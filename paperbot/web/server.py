@@ -11,6 +11,7 @@ Local only: it listens on 127.0.0.1, rejects other Host headers (DNS rebinding),
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -39,6 +40,18 @@ from ..risk import KillSwitch
 from ..scanner import market_hours
 
 STATIC = Path(__file__).parent / "static"
+
+
+class VersionedStaticFiles(StaticFiles):
+    """Cache assets with a page-generated version URL for a year."""
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if response.status_code == 200 and any(part.startswith(b"v=") for part in scope.get("query_string", b"").split(b"&")):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
 DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Commands the page can run, as `python -m paperbot <args>`. Nothing else can be run.
@@ -101,9 +114,20 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
 
     # --- page ---
 
+    asset_version = {"fingerprint": None, "value": None}
+
     def version() -> str:
         """Changes whenever the page's files do: new URLs (no stale cache), and an open page reloads itself."""
-        return str(max(int(f.stat().st_mtime) for f in STATIC.iterdir()))
+        files = [path for path in sorted(STATIC.iterdir()) if path.is_file()]
+        fingerprint = tuple((path.name, path.stat().st_mtime_ns, path.stat().st_size) for path in files)
+        if fingerprint != asset_version["fingerprint"]:
+            digest = hashlib.sha256()
+            for path in files:
+                digest.update(path.name.encode())
+                digest.update(path.read_bytes())
+            asset_version["fingerprint"] = fingerprint
+            asset_version["value"] = digest.hexdigest()[:16]
+        return asset_version["value"]
 
     async def index(request: Request) -> Response:
         html = (STATIC / "index.html").read_text().replace("{{TOKEN}}", token).replace("{{V}}", version())
@@ -298,12 +322,28 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
             return error("date must be YYYY-MM-DD")
         return JSONResponse(run_command(name, day))
 
+    def status_snapshot(c: Config, now: datetime | None = None) -> dict:
+        now = now or datetime.now(c.schedule.tz)
+        scanner = scanner_state(c)
+        return {"version": version(), "now": now.isoformat(), "market_open": market_hours(now),
+                "scanner": scanner, "live_symbols": live_list(c).info(), "halts": halts(c)}
+
+    def page_snapshot(c: Config) -> dict:
+        now = datetime.now(c.schedule.tz)
+        day = now.date()
+        sigs = signal_rows(c, day)
+        overview = status_snapshot(c, now)
+        overview.update({"signals_today": len(sigs), "against_today": sum(1 for s in sigs if s["against"])})
+        return {"overview": overview, "state": overview["scanner"], "signals": {"date": day.isoformat(), "signals": sigs}}
+
     async def overview(request: Request) -> Response:
-        c = cfg()
-        sigs = signal_rows(c, today(c))
-        return JSONResponse({"version": version(), "now": datetime.now(c.schedule.tz).isoformat(), "market_open": market_hours(datetime.now(c.schedule.tz)),
-                             "scanner": scanner_state(c), "live_symbols": live_list(c).info(), "halts": halts(c),
-                             "signals_today": len(sigs), "against_today": sum(1 for s in sigs if s["against"])})
+        return JSONResponse(page_snapshot(cfg())["overview"])
+
+    async def status(request: Request) -> Response:
+        return JSONResponse(status_snapshot(cfg()))
+
+    async def dashboard(request: Request) -> Response:
+        return JSONResponse(page_snapshot(cfg()))
 
     # --- guard: a token on every change, local hosts only ---
 
@@ -323,6 +363,8 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
     routes = [
         Route("/", index),
         Route("/api/overview", overview),
+        Route("/api/status", status),
+        Route("/api/dashboard", dashboard),
         Route("/api/state", state),
         Route("/api/signals", signals),
         Route("/api/dates", dates),
@@ -334,7 +376,7 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
         Route("/api/journal", journal_view),
         Route("/api/commands", commands),
         Route("/api/commands/{name}", run, methods=["POST"]),
-        Mount("/static", StaticFiles(directory=STATIC), name="static"),
+        Mount("/static", VersionedStaticFiles(directory=STATIC), name="static"),
     ]
     app = Starlette(routes=routes, middleware=[
         Middleware(TrustedHostMiddleware, allowed_hosts=list(hosts)),

@@ -60,6 +60,7 @@ function showTab(name) {
   $$(".tab").forEach((t) => t.classList.toggle("active", t.id === `tab-${name}`));
   if (location.hash !== `#${name}`) history.replaceState(null, "", `#${name}`);
   loaders[name]?.();
+  schedulePoll(name === "dashboard" ? POLL_MS : OVERVIEW_POLL_MS);
 }
 $$("#nav button").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
 window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
@@ -92,33 +93,83 @@ let seen = null; // signal ids already shown, so new ones flash
 let lastSignals = [];
 let lastState = null;
 let liveInfo = null;
+let dashboardRefresh = null;
+let chartLibraryPromise = null;
+
+function loadChartLibrary() {
+  if (window.LightweightCharts) return Promise.resolve();
+  if (!chartLibraryPromise) {
+    chartLibraryPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js";
+      script.async = true;
+      script.onload = () => window.LightweightCharts ? resolve() : reject(new Error("Chart library did not initialize"));
+      script.onerror = () => reject(new Error("Chart library failed to load"));
+      document.head.append(script);
+    });
+  }
+  return chartLibraryPromise;
+}
+
+const chartObserver = "IntersectionObserver" in window ? new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    chartObserver.unobserve(entry.target);
+    const card = cards[entry.target.closest(".card")?.dataset.sym];
+    if (card) loadCardChart(card);
+  }
+}, { rootMargin: "300px 0px" }) : null;
+
+function loadCardChart(card) {
+  if (card.chart || card.chartLoading) return;
+  card.chartLoading = true;
+  loadChartLibrary().then(() => {
+    if (!card.el.isConnected || card.chart) return;
+    initializeChart(card);
+    card.chartLoading = false;
+    card.loading.remove();
+    updateCard(card, card.el.dataset.sym, lastState?.symbols?.[card.el.dataset.sym]);
+  }).catch(() => {
+    card.chartLoading = false;
+    card.loading.textContent = "Chart unavailable. Check your internet connection.";
+    card.loading.classList.add("error");
+  });
+}
 
 function signalId(s) {
   return `${s.ts}|${s.symbol}|${s.kind}|${s.level}`;
 }
 
 async function refreshDashboard() {
-  try {
-    const [ov, st, sg] = await Promise.all([api("/api/overview"), api("/api/state"), api("/api/signals")]);
-    renderPills(ov);
-    liveInfo = ov.live_symbols;
-    lastState = st;
-    lastSignals = sg.signals;
-    renderChips();
-    renderCards();
-    renderPositions();
-    renderFeed();
-  } catch (e) {
-    $("#live-note").textContent = "Can't reach the server: " + e.message;
-  }
+  if (dashboardRefresh) return dashboardRefresh;
+  dashboardRefresh = (async () => {
+    try {
+      const { overview: ov, state: st, signals: sg } = await api("/api/dashboard");
+      renderPills(ov);
+      liveInfo = ov.live_symbols;
+      lastState = st;
+      lastSignals = sg.signals;
+      renderChips();
+      renderCards();
+      renderPositions();
+      renderFeed();
+    } catch (e) {
+      $("#live-note").textContent = "Can't reach the server: " + e.message;
+    }
+  })();
+  try { await dashboardRefresh; } finally { dashboardRefresh = null; }
 }
 
 function renderChips() {
   const syms = liveInfo.symbols;
   const bad = new Set(lastState?.no_data || []);
-  $("#chips").innerHTML = syms.length
-    ? syms.map((s) => `<span class="chip${bad.has(s) ? " bad" : ""}" title="${bad.has(s) ? "No data from Robinhood: check the ticker" : ""}">${esc(s)}<button title="Stop scanning ${esc(s)}" data-remove="${esc(s)}">×</button></span>`).join("")
-    : `<span class="muted">none set: everything you hold</span>`;
+  const chipsKey = JSON.stringify([syms, [...bad].sort()]);
+  if ($("#chips").dataset.key !== chipsKey) {
+    $("#chips").dataset.key = chipsKey;
+    $("#chips").innerHTML = syms.length
+      ? syms.map((s) => `<span class="chip${bad.has(s) ? " bad" : ""}" title="${bad.has(s) ? "No data from Robinhood: check the ticker" : ""}">${esc(s)}<button title="Stop scanning ${esc(s)}" data-remove="${esc(s)}">×</button></span>`).join("")
+      : `<span class="muted">none set: everything you hold</span>`;
+  }
   const st = lastState;
   $("#live-note").textContent =
     st.status === "off" ? "The live scanner hasn't written anything yet." :
@@ -182,10 +233,18 @@ function makeCard(sym) {
     <div class="card-foot"><span class="hold muted"></span><span class="levels"></span></div>`;
   const card = { el, keys: {}, levelLines: [] };
   const box = $(".chart", el);
-  if (!window.LightweightCharts) {
-    box.innerHTML = `<div class="empty">The chart library didn't load (it comes from unpkg.com, so it needs the internet).</div>`;
-    return card;
-  }
+  card.box = box;
+  card.loading = document.createElement("div");
+  card.loading.className = "chart-loading";
+  card.loading.textContent = "Chart loads when this card is near view…";
+  box.append(card.loading);
+  if (chartObserver) chartObserver.observe(box);
+  else loadCardChart(card);
+  return card;
+}
+
+function initializeChart(card) {
+  const box = $(".chart", card.el);
   const fmt = (t) => etTime(new Date(t * 1000));
   card.chart = LightweightCharts.createChart(box, {
     autoSize: true,
@@ -202,7 +261,6 @@ function makeCard(sym) {
   card.candles.priceScale().applyOptions({ scaleMargins: { top: 0.08, bottom: 0.22 } });
   card.volume = card.chart.addHistogramSeries({ priceScaleId: "", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false });
   card.volume.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
-  return card;
 }
 
 function renderCards() {
@@ -210,13 +268,22 @@ function renderCards() {
   const order = [...new Set([...(liveInfo?.symbols || []), ...Object.keys(st.symbols || {})])];
   const root = $("#cards");
   if (!order.length) {
+    for (const k of Object.keys(cards)) {
+      chartObserver?.unobserve(cards[k].box);
+      cards[k].chart?.remove();
+      delete cards[k];
+    }
     root.innerHTML = `<div class="empty">Nothing to show yet. Add a symbol above; the live scanner draws it after its next check.</div>`;
-    for (const k of Object.keys(cards)) delete cards[k];
     return;
   }
   $(".empty", root)?.remove();
   for (const sym of Object.keys(cards)) {
-    if (!order.includes(sym)) { cards[sym].chart?.remove(); cards[sym].el.remove(); delete cards[sym]; }
+    if (!order.includes(sym)) {
+      chartObserver?.unobserve(cards[sym].box);
+      cards[sym].chart?.remove();
+      cards[sym].el.remove();
+      delete cards[sym];
+    }
   }
   order.forEach((sym, i) => {
     if (!cards[sym]) cards[sym] = makeCard(sym);
@@ -286,12 +353,12 @@ function updateCard(card, sym, v) {
     card.candles.update({ time: f[0], open: f[1], high: f[2], low: f[3], close: f[4] });
   }
   // signal markers, snapped to the candle they belong to
-  const times = bars.map((b) => b[0]);
-  const snap = (t) => { let best = times[0]; for (const x of times) if (x <= t) best = x; return best; };
-  const sigs = lastSignals.filter((s) => s.symbol === sym && times.length);
-  const mkKey = sigs.map(signalId).join(",") + barKey;
+  const mkKey = lastSignals.filter((s) => s.symbol === sym).map(signalId).join(",") + barKey;
   if (mkKey !== card.keys.markers) {
     card.keys.markers = mkKey;
+    const times = bars.map((b) => b[0]);
+    const snap = (t) => { let best = times[0]; for (const x of times) if (x <= t) best = x; return best; };
+    const sigs = lastSignals.filter((s) => s.symbol === sym && times.length);
     // one marker per candle and side; only the latest few carry a label, so the chart stays readable
     const groups = new Map();
     for (const s of sigs) {
@@ -382,15 +449,23 @@ function renderFeed() {
   const sel = $("#feed-symbol");
   const syms = [...new Set(lastSignals.map((s) => s.symbol))].sort();
   const cur = sel.value;
-  sel.innerHTML = `<option value="">All symbols</option>` + syms.map((s) => `<option${s === cur ? " selected" : ""}>${esc(s)}</option>`).join("");
+  const symbolsKey = syms.join("\u001f");
+  if (sel.dataset.symbols !== symbolsKey) {
+    sel.dataset.symbols = symbolsKey;
+    sel.innerHTML = `<option value="">All symbols</option>` + syms.map((s) => `<option${s === cur ? " selected" : ""}>${esc(s)}</option>`).join("");
+  }
   const rows = lastSignals.filter((s) => feedFilter(s, sel.value, $("#feed-side").value, $("#feed-against").checked, $("#feed-weak").checked));
   const first = seen === null;
   seen = seen || new Set();
-  $("#feed").innerHTML = rows.length ? rows.slice(0, 300).map((s) => {
-    const id = signalId(s);
-    const isNew = !first && !seen.has(id);
-    return signalItem(s, isNew);
-  }).join("") : `<li class="muted">No signals yet today.</li>`;
+  const feedKey = `${sel.value}|${$("#feed-side").value}|${$("#feed-against").checked}|${$("#feed-weak").checked}|${rows.map(signalId).join("\u001f")}`;
+  if ($("#feed").dataset.key !== feedKey) {
+    $("#feed").dataset.key = feedKey;
+    $("#feed").innerHTML = rows.length ? rows.slice(0, 300).map((s) => {
+      const id = signalId(s);
+      const isNew = !first && !seen.has(id);
+      return signalItem(s, isNew);
+    }).join("") : `<li class="muted">No signals yet today.</li>`;
+  }
   lastSignals.forEach((s) => seen.add(signalId(s)));
   $("#feed-count").textContent = rows.length;
   const against = lastSignals.filter((s) => s.against === true && !s.weak).length;
@@ -399,11 +474,34 @@ function renderFeed() {
 ["#feed-symbol", "#feed-side", "#feed-against", "#feed-weak"].forEach((s) => $(s).addEventListener("change", renderFeed));
 
 loaders.dashboard = refreshDashboard;
-setInterval(() => {
+const OVERVIEW_POLL_MS = 15000;
+let pollTimer = null;
+let pollRunning = false;
+function schedulePoll(delay) {
+  clearTimeout(pollTimer);
+  if (!document.hidden) pollTimer = setTimeout(poll, delay);
+}
+async function poll() {
+  pollTimer = null;
   if (document.hidden) return;
-  if (activeTab() === "dashboard") refreshDashboard();
-  else api("/api/overview").then(renderPills).catch(() => {});
-}, POLL_MS);
+  if (pollRunning) return schedulePoll(1000);
+  pollRunning = true;
+  try {
+    if (activeTab() === "dashboard") await refreshDashboard();
+    else await refreshPills();
+  } finally {
+    pollRunning = false;
+    schedulePoll(activeTab() === "dashboard" ? POLL_MS : OVERVIEW_POLL_MS);
+  }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) clearTimeout(pollTimer);
+  else {
+    if (activeTab() === "dashboard") refreshDashboard();
+    else refreshPills();
+    schedulePoll(activeTab() === "dashboard" ? POLL_MS : OVERVIEW_POLL_MS);
+  }
+});
 
 /* ---------- signals history ---------- */
 
@@ -652,9 +750,10 @@ async function loadJournal() {
 $("#jr-date").addEventListener("change", loadJournal);
 $("#jr-event").addEventListener("change", loadJournal);
 
-function refreshPills() { api("/api/overview").then(renderPills).catch(() => {}); }
+function refreshPills() { return api("/api/status").then(renderPills).catch(() => {}); }
 
 /* ---------- start ---------- */
 
-refreshPills();
-showTab((location.hash || "#dashboard").slice(1));
+const initialTab = (location.hash || "#dashboard").slice(1);
+if (initialTab !== "dashboard") refreshPills();
+showTab(initialTab);
