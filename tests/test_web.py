@@ -40,6 +40,13 @@ def test_page_carries_the_token_and_changes_need_it(web):
     assert web.post_ok("/api/live-symbols", {"action": "add", "symbols": ["qqq"]}).json()["symbols"][-1] == "QQQ"
 
 
+def test_a_page_from_before_a_restart_can_get_the_new_token(web):
+    r = web.get("/api/token")
+    assert r.json() == {"token": "t0k"} and "access-control-allow-origin" not in r.headers
+    assert r.headers["cache-control"] == "no-store"
+    assert web.get("/api/token", headers={"Host": "evil.example"}).status_code == 400
+
+
 def test_other_hosts_are_refused(web):
     assert web.get("/api/state", headers={"Host": "evil.example"}).status_code == 400
 

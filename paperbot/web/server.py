@@ -360,8 +360,14 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
                     return
             await self.app(scope, receive, send)
 
+    async def token_view(request: Request) -> Response:
+        """The current token, for a page loaded before the server restarted. Only this page's own origin can
+        read it (no CORS headers, and other Host names are refused), the same as the token in the page."""
+        return JSONResponse({"token": token}, headers={"Cache-Control": "no-store"})
+
     routes = [
         Route("/", index),
+        Route("/api/token", token_view),
         Route("/api/overview", overview),
         Route("/api/status", status),
         Route("/api/dashboard", dashboard),

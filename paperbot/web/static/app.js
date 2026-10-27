@@ -2,7 +2,7 @@
 
 // paperbot's web page. Reads the JSON API in paperbot/web/server.py; every change is a POST with the page's token.
 
-const TOKEN = window.PAPERBOT_TOKEN;
+let TOKEN = window.PAPERBOT_TOKEN; // renewed from /api/token when the server has restarted
 const ET = "America/New_York";
 const POLL_MS = 5000;
 
@@ -26,6 +26,14 @@ async function api(path, opts = {}) {
   }
   if (init.method !== "GET") init.headers["X-Paperbot-Token"] = TOKEN;
   const r = await fetch(path, init);
+  if (r.status === 403 && init.method !== "GET" && !opts.retried) {
+    // the server restarted since this page loaded, so it has a new token: fetch it and try once more
+    const t = await fetch("/api/token", { cache: "no-store" }).then((x) => x.json()).catch(() => null);
+    if (t && t.token && t.token !== TOKEN) {
+      TOKEN = t.token;
+      return api(path, { ...opts, retried: true });
+    }
+  }
   let data = null;
   try { data = await r.json(); } catch { /* not JSON */ }
   if (!r.ok) throw new Error((data && data.error) || `${r.status} ${r.statusText}`);
