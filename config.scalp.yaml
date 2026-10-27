@@ -1,0 +1,105 @@
+# Scalp profile: shorter holds, tighter stops, faster checks. Run it with
+#   .venv/bin/python -m paperbot --config config.scalp.yaml run
+# It shares logs/ (and the kill switch) with the default profile, so run one profile at a time.
+#
+# Groq's free tier can't sustain this: 5-minute cycles use roughly 300K+ AI tokens a day, above
+# its daily limit, so cycles would start holding in the afternoon. Use a paid tier, or set
+# decision_interval_minutes to 15 (the code-side exits still run every 15 seconds either way).
+#
+# Read docs/RESEARCH.md first: most retail scalpers lose money, short-dated options are the
+# hardest place to do it, and an AI consulted every few minutes is not fast enough for
+# second-by-second scalping. This profile scalps on a minutes-to-an-hour scale, with code
+# doing the fast part (stops, time stops, the end-of-day close) and the AI choosing entries.
+
+account_number: null
+options_feed: indicative
+stock_feed: iex
+log_dir: logs
+
+schedule:
+  timezone: America/New_York
+  decision_interval_minutes: 5    # the AI is consulted twice as often as the default profile
+  watch_interval_seconds: 15      # exits and stops are checked every 15 s
+  trading_start: "09:45"
+  trading_end: "15:45"
+  no_new_entries_after: "15:00"
+
+risk:
+  universe: [SPY, QQQ]            # the most liquid options, with the tightest spreads
+  max_contracts_per_order: 3
+  max_position_usd: 1500
+  max_positions: 2
+  max_same_direction_positions: 1
+  max_entries_per_day: 8
+  daily_loss_limit_pct: 1.0       # half the default profile's limit
+  min_dte: 1
+  max_dte: 3
+  max_spread_pct: 6               # scalps can't afford wide spreads
+  min_hold_minutes: 5
+  reentry_cooldown_minutes: 15
+  max_risk_per_trade_pct: 0.3
+  max_consecutive_losses: 3
+  entry_cooldown_minutes: 10
+  max_quote_age_seconds: 20
+  delta_min: 0.40
+  delta_max: 0.60
+  min_open_interest: 100
+  max_theta_pct_per_day: 35       # scalps are held minutes, so a higher daily decay is tolerable
+  stop_slippage_factor: 1.5
+  blackout:
+    - {date: 2026-10-28, start: "13:45", end: "15:00", reason: FOMC decision 14:00 and press conference}
+    - {start: "11:45", end: "13:15", reason: midday lull}
+
+exits:
+  stop_loss_pct: 20
+  take_profit_pct: 30
+  close_at_dte: 0                 # anything expiring today is closed at the first check
+  broker_stop: true
+  exit_order_ttl_seconds: 30
+  breakeven_at_pct: 12
+  trail_start_pct: 20
+  trail_pct: 12
+  max_hold_minutes: 45            # time stop: a scalp that hasn't worked in 45 minutes is closed
+  min_stop_step_pct: 3            # trailing moves the broker stop in steps, not every 15 s tick
+  close_all_at: "15:50"           # never hold a scalp overnight
+
+orders:
+  entry_offset: 0.1               # closer to the mid than the default profile
+  entry_ttl_minutes: 2
+
+llm:
+  provider: groq
+  max_tool_calls: 2
+  contracts_per_underlying: 8
+  max_proposals: 1
+  anthropic:
+    model: claude-opus-5-5
+    effort: high
+    max_tokens: 16000
+  xai:
+    model: grok-4.7
+    max_tokens: 16000
+  groq:
+    model: openai/gpt-oss-120b
+    max_tokens: 2000
+    reasoning_effort: low
+    max_tool_calls: 1
+    contracts_per_underlying: 6
+    daily_token_budget: 180000
+
+alerts:
+  provider: ntfy
+  ntfy_server: https://ntfy.sh
+  notify_rejections: false
+  dedupe_seconds: 600
+  signals: true
+  signal_interval_minutes: 2
+  signal_first_half_hour_pct: 0.4
+
+strategy: |
+  Scalp SPY and QQQ options with 1-3 days to expiration, at or near the money (|delta| 0.40-0.60).
+  Enter only in the direction of a clear intraday move that the code-computed features confirm:
+  price on the same side of VWAP as the trade, an opening-range break in that direction, and an
+  EMA trend that agrees. Skip the trade when they disagree, when the spread is wide, or when
+  volume is fading. Exits are automatic: -20% stop, +30% target, breakeven after +12%, a
+  45-minute time stop, and everything closed by 15:50. One idea at a time. No reason, no trade.

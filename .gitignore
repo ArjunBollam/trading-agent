@@ -1,0 +1,11 @@
+.env
+.venv/
+logs/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.snapshots/
+.venv.broken/
+.ruff_cache/
+.DS_Store
+*.tmp

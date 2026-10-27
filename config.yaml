@@ -1,0 +1,153 @@
+# paperbot configuration. Every limit here is enforced by code (paperbot/risk.py),
+# not by the prompt. Proposals that break a limit are rejected, never resized.
+
+# Optional: refuse to run unless the broker account number matches.
+account_number: null
+
+# Alpaca market-data feeds. Free paper accounts get "indicative" options quotes and "iex" stock data.
+options_feed: indicative
+stock_feed: iex
+
+log_dir: logs
+
+schedule:
+  timezone: America/New_York
+  decision_interval_minutes: 15   # how often the AI is consulted. 15 keeps Groq's free tier inside its
+                                  # daily token limit (~4.5K tokens per call); 10 is fine on paid providers.
+  watch_interval_seconds: 30      # how often code checks stops, exits and the loss limit
+  trading_start: "09:45"
+  trading_end: "15:45"
+  no_new_entries_after: "15:15"
+
+risk:
+  universe: [SPY, QQQ, AAPL, MSFT, NVDA]
+  max_contracts_per_order: 5
+  max_position_usd: 2000          # premium per contract symbol, including pending buys
+  max_positions: 3                # distinct option contracts held or pending
+  max_same_direction_positions: 2 # at most 2 calls (or 2 puts) at once: these underlyings move together
+  manage_external_positions: true # positions you open yourself in this account also get stops and exits
+  max_entries_per_day: 6
+  daily_loss_limit_pct: 2.0       # from start-of-day equity; breaching it sells everything and halts for the day
+  soft_loss_limit_pct: 1.0        # past a 1% drawdown, each new trade risks half as much (personal buffer)
+  min_dte: 2
+  max_dte: 14
+  max_spread_pct: 10              # (ask - bid) / mid, on a fresh quote. 10% is the common rule of thumb;
+                                  # at 10% a round trip costs about 6% of the premium.
+  min_hold_minutes: 20            # the AI can't sell a position younger than this (code exits can). Must be >= 1.
+  reentry_cooldown_minutes: 30    # no new buy on an underlying for this long after selling it
+  max_risk_per_trade_pct: 0.5     # a new entry's loss at its stop must fit in 0.5% of start-of-day equity
+  max_consecutive_losses: 3       # after 3 losing trades in a row, no new trades for the rest of the day
+  entry_cooldown_minutes: 5       # wait at least this long between new entries (curbs overtrading)
+  max_quote_age_seconds: 60       # never open a trade on a quote older than this
+  blackout:                       # no new entries in these windows (exits keep running)
+    - {date: 2026-10-28, start: "13:45", end: "15:00", reason: FOMC decision 14:00 and press conference}
+    # 08:30 releases land before trading starts; skip the first half hour after them (a judgment call).
+    - {date: 2026-11-06, start: "09:45", end: "10:15", reason: jobs report 08:30}
+    - {date: 2026-11-10, start: "09:45", end: "10:15", reason: CPI 08:30 (per bls.gov/cpi)}
+    # A daily window has no date, e.g. skip the midday lull:
+    # - {start: "11:45", end: "13:15", reason: midday lull}
+  delta_min: 0.30                 # entries need |delta| between these (checked on a fresh snapshot)
+  delta_max: 0.70
+  min_open_interest: 100          # skip contracts almost nobody holds (prior-day open interest)...
+  oi_waived_below_spread_pct: 3   # ...unless the live spread is this tight. Measured: liquid SPY/QQQ
+                                  # weeklies with <=3% spreads often show OI under 100.
+  stop_slippage_factor: 1.5       # size as if a stop-out loses 1.5x the stop distance. Simulated on real
+                                  # SPY/QQQ option bars, the worst stop fills reached ~2x the stop.
+  max_theta_pct_per_day: 10       # refuse options losing more than 10% of their price per day to decay.
+                                  # Measured: near-the-money SPY at 2 DTE ~25%/day, 4 DTE ~13%/day.
+  earnings_block_days: 2          # no new entries this many trading days before an earnings gap
+  earnings_exit_time: "15:30"     # positions in that stock are closed from this time on the last session
+  max_order_actions_per_10min: 30 # runaway protection: more order submits + cancels than this stops everything
+  max_order_errors_per_10min: 5   # ...as do this many broker rejections
+  earnings:                       # bmo = before the open, amc = after the close. Check dates before each week.
+    - {symbol: MSFT, date: 2026-10-28, time: amc}    # confirmed on Microsoft's investor relations page
+    - {symbol: AAPL, date: 2026-11-02, time: amc}    # per Apple's IR page as reported by StockTitan
+    - {symbol: NVDA, date: 2026-11-18, time: amc}    # projected, not yet confirmed by NVIDIA
+
+exits:
+  stop_loss_pct: 35
+  take_profit_pct: 60
+  close_at_dte: 1                 # close anything with this many days (or fewer) left to expiration
+  broker_stop: true               # keep a GTC stop order at Alpaca for every position
+  exit_order_ttl_seconds: 60      # an exit limit order that hasn't filled by then is replaced by a market order
+  breakeven_at_pct: 30            # once up 30%, the broker stop moves up to the entry price (it never moves down)
+  trail_start_pct: null           # optional trailing stop: once up this much...
+  trail_pct: null                 # ...keep the stop this far below the mark
+  max_hold_minutes: null          # optional time stop (the scalp profile uses one)
+  min_stop_step_pct: 3            # move the broker stop only in steps of 3% of entry (avoids order churn)
+  close_all_at: null              # optional time of day to close everything, e.g. "15:50"
+
+orders:
+  # Entries are limit orders at mid + entry_offset * (ask - mid). 0 = mid, 1 = ask.
+  entry_offset: 0.2
+  entry_ttl_minutes: 5            # cancel entry orders that haven't filled by then
+
+llm:
+  provider: groq                  # anthropic (Claude) | xai (Grok) | groq. Put that provider's key in .env.
+  max_tool_calls: 6               # research tool calls per cycle
+  contracts_per_underlying: 12    # candidates shown in the prompt (half calls, half puts)
+  max_proposals: 3
+  anthropic:                      # ANTHROPIC_API_KEY
+    model: claude-opus-5-5
+    effort: high
+    max_tokens: 16000
+  xai:                            # XAI_API_KEY. Structured outputs work alongside tools on Grok 4 models.
+    model: grok-4.7
+    max_tokens: 16000
+  groq:                           # GROQ_API_KEY. Sized for the free tier (~8K tokens/minute, which
+    model: openai/gpt-oss-120b    # counts max_tokens too), so the prompt and tool budget are smaller.
+    max_tokens: 2000
+    reasoning_effort: low
+    max_tool_calls: 2             # overrides the shared setting above for this provider
+    daily_token_budget: 180000    # stop AI cycles for the day here (free tier is reported at ~200K/day)
+    contracts_per_underlying: 6
+
+alerts:
+  provider: ntfy                  # ntfy | telegram | console
+  ntfy_server: https://ntfy.sh
+  notify_rejections: false        # rejected proposals are logged; set true to also push them
+  dedupe_seconds: 600             # identical alerts within this window are sent once
+
+scan:                             # `paperbot scan`: read-only chart signals on your Robinhood positions
+  watchlist: [TSLA]               # also scan these symbols, held or not, e.g. [SPY, QQQ]
+  bar_minutes: 5                  # 1 | 5 | 10 | 30
+  cooldown_minutes: 30            # the same kind of signal on the same symbol (and level), at most this often
+  rsi_oversold: 30
+  rsi_overbought: 70
+  min_cross_atr: 0.2              # a VWAP/EMA/MACD cross must clear 0.2 ATR, so chop around a line is ignored
+  breakout_volume_ratio: 1.5      # breakouts below 1.5x volume are "weak": printed, not alerted
+  alert_weak: false
+  one_alert_per_symbol: true      # one phone alert per symbol per scan, listing every new signal
+
+  # `paperbot scan --live` (the background SPY job). Change the symbols while it runs with
+  # `paperbot live-symbols add QQQ` / `remove` / `set` / `reset`; that list then wins over this one.
+  live_symbols: [SPY]             # empty: everything you hold plus the watchlist
+  tick_seconds: 10                # between candle closes, check the live price this often (0 = off)
+  tick_cooldown_minutes: 10       # the same live level cross, at most this often
+  live_positions_seconds: 60      # live checks re-read your positions at most this often
+
+  # Chart patterns, grouped like thinkorswim's tabs. `paperbot patterns` lists every name and what it does.
+  pattern_groups: [classic, candlestick, fibonacci]
+  disabled_patterns: []           # never reported, e.g. [spinning_top]
+  log_only_patterns: [doji, long_legged_doji, spinning_top, williams_fractal_high, williams_fractal_low]
+  candle_trend_atr: 0.75          # a reversal candle needs a move into it of this many ATRs
+  pattern_swing_atr: 1.0          # swing highs and lows for chart patterns: moves of this many ATRs
+  pattern_tolerance_atr: 0.5      # "equal" tops and bottoms are within this many ATRs
+  pattern_lookback: 120           # bars a chart pattern can span (about 1.5 days of 5-minute bars)
+  flag_pole_atr: 3.0              # a flag's or pennant's pole moves at least this many ATRs
+  fib_swing_atr: 3.0              # Fibonacci retracements of swings at least this big
+  forming_near_atr: 0.5           # warn of a head and shoulders / double / triple top or bottom still forming
+                                  # once price closes this close (in ATRs) to its neckline
+
+  # The bigger picture: every signal is checked against the last few hours and a slower candle
+  # (patterns that broke and still hold, ones still forming, lower highs / higher lows, trend, RSI, VWAP).
+  context_mode: warn              # warn: flag conflicting alerts, high priority | suppress: log them only | off
+  context_minutes: 180            # how far back it looks
+  context_bar_minutes: 15         # 15 | 30 | 60: the slower candle
+  context_threshold: 3            # score at which the picture counts as bullish or bearish
+
+strategy: |
+  Buy calls or puts with 2-14 days to expiration, at or near the money (|delta| 0.35-0.60).
+  Take a position only when there is a clear, current reason: a strong intraday trend in the
+  underlying, a fresh news catalyst, or a sharp move away from the prior close. One idea per
+  underlying at a time. No reason, no trade.

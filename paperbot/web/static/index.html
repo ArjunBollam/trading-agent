@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>paperbot</title>
+  <link rel="stylesheet" href="/static/app.css?v={{V}}">
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+  <script>window.PAPERBOT_TOKEN = "{{TOKEN}}"; window.PAPERBOT_VERSION = "{{V}}";</script>
+  <script src="/static/app.js?v={{V}}" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">paper<span>bot</span></div>
+    <nav id="nav">
+      <button data-tab="dashboard" class="active">Dashboard</button>
+      <button data-tab="signals">Signals</button>
+      <button data-tab="patterns">Patterns</button>
+      <button data-tab="settings">Settings</button>
+      <button data-tab="bot">Paper bot</button>
+    </nav>
+    <div class="pills">
+      <span class="pill" id="pill-scanner" title="The live scanner (launchd job com.paperbot.spy-live)">Scanner …</span>
+      <span class="pill" id="pill-market">Market …</span>
+      <span class="pill" id="pill-halt" title="The paper bot's kill switch">Bot …</span>
+      <span class="clock" id="clock"></span>
+    </div>
+  </header>
+
+  <main>
+    <!-- Dashboard -->
+    <section id="tab-dashboard" class="tab active">
+      <div class="toolbar">
+        <span class="label">Live symbols</span>
+        <div id="chips" class="chips"></div>
+        <form id="add-symbol" class="inline">
+          <input id="add-symbol-input" placeholder="Add symbol, e.g. QQQ" autocomplete="off" spellcheck="false">
+          <button type="submit">Add</button>
+        </form>
+        <span class="muted" id="live-note"></span>
+      </div>
+      <div class="dash">
+        <div id="cards" class="cards"></div>
+        <aside class="side">
+          <div class="panel">
+            <div class="panel-head"><h3>Positions</h3><span class="muted" id="pos-note"></span></div>
+            <div id="positions"></div>
+          </div>
+          <div class="panel feed-panel">
+            <div class="panel-head">
+              <h3>Signals today <span class="count" id="feed-count"></span></h3>
+              <span class="muted small" id="feed-note"></span>
+            </div>
+            <div class="filters">
+              <select id="feed-symbol"><option value="">All symbols</option></select>
+              <select id="feed-side"><option value="">Buy and sell</option><option value="buy">Buy</option><option value="sell">Sell</option></select>
+              <label><input type="checkbox" id="feed-against"> Against me</label>
+              <label><input type="checkbox" id="feed-weak"> Log-only too</label>
+            </div>
+            <ul id="feed" class="feed"></ul>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- Signals history -->
+    <section id="tab-signals" class="tab">
+      <div class="toolbar">
+        <select id="sig-date"></select>
+        <select id="sig-symbol"><option value="">All symbols</option></select>
+        <select id="sig-side"><option value="">Buy and sell</option><option value="buy">Buy</option><option value="sell">Sell</option></select>
+        <input id="sig-search" placeholder="Search signals" spellcheck="false">
+        <label><input type="checkbox" id="sig-against"> Against my position</label>
+        <label><input type="checkbox" id="sig-weak" checked> Include log-only</label>
+        <span class="muted" id="sig-note"></span>
+      </div>
+      <div class="panel"><div id="sig-kinds" class="kinds"></div></div>
+      <div class="panel table-wrap"><table id="sig-table" class="grid"></table></div>
+    </section>
+
+    <!-- Patterns -->
+    <section id="tab-patterns" class="tab">
+      <div class="toolbar">
+        <span class="label">Groups</span>
+        <div id="pat-groups" class="chips"></div>
+        <input id="pat-search" placeholder="Search patterns" spellcheck="false">
+        <span class="muted">Alert: phone + log. Log: log only. Off: not checked. Changes apply to a running scan within one check.</span>
+      </div>
+      <div id="pat-list" class="pat-list"></div>
+    </section>
+
+    <!-- Settings -->
+    <section id="tab-settings" class="tab">
+      <div class="toolbar">
+        <span class="label">Scanner settings</span>
+        <span class="muted" id="set-note"></span>
+        <span class="spacer"></span>
+        <button id="set-reset" class="ghost">Reset all to config.yaml</button>
+        <button id="set-save" class="primary">Save changes</button>
+      </div>
+      <div class="panel"><form id="set-form" class="settings"></form></div>
+      <details class="panel">
+        <summary>Full configuration (read-only; edit config.yaml, then restart the bot)</summary>
+        <pre id="config-json" class="code"></pre>
+      </details>
+    </section>
+
+    <!-- Paper bot -->
+    <section id="tab-bot" class="tab">
+      <div class="bot-grid">
+        <div class="panel">
+          <div class="panel-head"><h3>Kill switch</h3></div>
+          <div id="halts" class="halts"></div>
+          <div class="row">
+            <button data-halt="halt" class="warn">Halt AI entries</button>
+            <button data-halt="halt_all" class="danger">Halt everything</button>
+            <button data-halt="resume" class="primary">Resume</button>
+          </div>
+          <p class="muted small">Halt stops the AI from opening trades; exits keep running. Halt everything also stops exit management. A daily loss halt clears itself tomorrow.</p>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>Commands</h3><input type="date" id="cmd-date" title="Date for Replay"></div>
+          <div id="commands" class="commands"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h3>Output</h3><span class="muted small" id="out-note"></span></div>
+        <pre id="cmd-output" class="code console">Run a command to see its output here.</pre>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Journal</h3>
+          <div class="filters">
+            <select id="jr-date"></select>
+            <select id="jr-event"><option value="">Every event</option></select>
+          </div>
+        </div>
+        <div class="table-wrap"><table id="jr-table" class="grid"></table></div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

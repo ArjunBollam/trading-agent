@@ -1,0 +1,120 @@
+# Aggressive options scalping: fast, frequent, same-day (0DTE) and next-day scalps on SPY and QQQ.
+# Start it with:
+#   .venv/bin/python -m paperbot --profile aggressive run
+# It shares logs/ and the kill switch with the other profiles, so run one profile at a time.
+#
+# "Aggressive" here means faster and more frequent, not bigger: per-trade risk, the daily loss
+# limit, the losing-streak breaker and runaway protection are the same rails as the default.
+#
+# Read before using (details in docs/RESEARCH.md):
+# - Retail 0DTE option buyers lost money in aggregate (Beckmeyer et al. 2023), and most day
+#   traders lose. On no-edge entries, paperbot's own simulation of these exits on real 0-1 DTE
+#   SPY data is in CHANGELOG.md.
+# - Same-day options can lose much of their value in minutes. Stops can fill well past their
+#   price, which is why sizing pads them 1.5x.
+# - Groq's free tier can't fund a 5-minute cycle all day. The daily token budget stops AI cycles
+#   when it runs out (exits keep running); on a paid tier, raise or remove it.
+# - Switching profiles applies these exits to any position you already hold (for example the
+#   10-minute time stop), so switch when you're flat or are happy for that to happen.
+
+account_number: null
+options_feed: indicative
+stock_feed: iex
+log_dir: logs
+
+schedule:
+  timezone: America/New_York
+  decision_interval_minutes: 5    # the AI is consulted every 5 minutes...
+  trigger_cycle_on_signal: true   # ...and again as soon as a setup alert fires
+  watch_interval_seconds: 10      # stops, exits and the loss limit are checked every 10 s
+  trading_start: "09:45"
+  trading_end: "15:30"
+  no_new_entries_after: "15:00"   # Alpaca stops accepting opening orders on expiring contracts at 15:30
+
+risk:
+  universe: [SPY, QQQ]            # the deepest, tightest option markets
+  max_contracts_per_order: 5
+  max_position_usd: 2000
+  max_positions: 2
+  max_same_direction_positions: 2
+  max_entries_per_day: 20
+  daily_loss_limit_pct: 2.0
+  soft_loss_limit_pct: 1.0
+  min_dte: 0                      # same-day expiries allowed...
+  max_dte: 1                      # ...and next-day
+  max_spread_pct: 5               # scalps can't pay wide spreads
+  min_hold_minutes: 2             # the AI may sell after 2 minutes
+  reentry_cooldown_minutes: 5
+  max_risk_per_trade_pct: 0.5
+  stop_slippage_factor: 1.5
+  max_consecutive_losses: 4       # 4 losers in a row ends entries for the day
+  entry_cooldown_minutes: 3
+  max_quote_age_seconds: 15
+  max_stock_data_age_seconds: 120
+  delta_min: 0.40
+  delta_max: 0.60
+  min_open_interest: 100
+  oi_waived_below_spread_pct: 3
+  max_theta_pct_per_day: null     # 0DTE decay per day is huge by nature; the 15-minute time stop limits it
+  max_order_actions_per_10min: 40 # more trades means more order traffic; still a runaway breaker
+  max_order_errors_per_10min: 5
+  blackout:
+    - {date: 2026-10-28, start: "13:45", end: "15:00", reason: FOMC decision 14:00 and press conference}
+    - {date: 2026-11-06, start: "09:45", end: "10:15", reason: jobs report 08:30}
+    - {date: 2026-11-10, start: "09:45", end: "10:15", reason: CPI 08:30 (per bls.gov/cpi)}
+  earnings: []                    # ETFs only
+
+exits:
+  stop_loss_pct: 15
+  take_profit_pct: 20
+  close_at_dte: -1                # same-day expiries are handled by close_all_at instead
+  broker_stop: true
+  exit_order_ttl_seconds: 20      # an unfilled exit limit becomes a market order after 20 s
+  breakeven_at_pct: 8
+  trail_start_pct: 12
+  trail_pct: 8
+  min_stop_step_pct: 3
+  max_hold_minutes: 10            # every scalp is closed within 10 minutes of its fill
+  close_all_at: "15:15"           # flat every day, well before the 15:30 expiration-day cutoff
+
+orders:
+  entry_offset: 0.3               # pay a little more of the spread to get filled quickly
+  entry_ttl_minutes: 1            # an entry that hasn't filled in a minute is stale
+
+llm:
+  provider: groq
+  max_tool_calls: 1
+  contracts_per_underlying: 8
+  max_proposals: 1
+  anthropic:
+    model: claude-opus-5-5
+    effort: high
+    max_tokens: 16000
+  xai:
+    model: grok-4.7
+    max_tokens: 16000
+  groq:
+    model: openai/gpt-oss-120b
+    max_tokens: 2000
+    reasoning_effort: low
+    max_tool_calls: 1
+    contracts_per_underlying: 8
+    daily_token_budget: 180000
+
+alerts:
+  provider: ntfy
+  ntfy_server: https://ntfy.sh
+  notify_rejections: false
+  dedupe_seconds: 300
+  signals: true
+  signal_interval_minutes: 1      # check for setups every minute
+  signal_first_half_hour_pct: 0.3
+
+strategy: |
+  Aggressive momentum scalping of SPY and QQQ options expiring today or tomorrow, at the money
+  (|delta| 0.40-0.60). Look for a fresh, clean intraday move: an opening-range break, price on
+  the same side of VWAP as the trade, EMA trend agreeing, and rising volume. Take the trade in
+  that direction and expect to be out within 10 minutes: exits are automatic (-15% stop, +20%
+  target, breakeven after +8%, trailing after +12%, 10-minute time stop, flat by 15:15). Skip
+  choppy markets where signals disagree, and skip anything with a wide spread. One idea at a time.
+  Sell early (after 2 minutes) only if the move clearly reverses. No reason, no trade.
