@@ -104,13 +104,19 @@ def test_signals_and_journal_come_from_the_journal(web):
 def test_scanner_state_and_status(web):
     assert web.get("/api/state").json()["status"] == "off"
     web.logs.mkdir(parents=True, exist_ok=True)
-    (web.logs / "scan_state.json").write_text(json.dumps({
-        "updated": datetime.now(TZ).isoformat(), "tick_seconds": 10, "bar_minutes": 5, "symbols": {"SPY": {"price": 1}},
-        "holdings": [], "options": []}))
+    state = {"updated": datetime.now(TZ).isoformat(), "tick_seconds": 10, "bar_minutes": 5,
+             "sessions": ["pre", "regular", "post"], "symbols": {"SPY": {"price": 1}}, "holdings": [], "options": []}
+    (web.logs / "scan_state.json").write_text(json.dumps(state))
     st = web.get("/api/state").json()
-    assert st["status"] == "running" and st["symbols"]["SPY"]["price"] == 1
+    # live during a session; between sessions idle, with when it resumes
+    assert st["status"] in ("running", "idle") and st["symbols"]["SPY"]["price"] == 1
+    assert ("resumes" in st) == (st["status"] == "idle")
     ov = web.get("/api/overview").json()
-    assert ov["scanner"]["status"] == "running" and ov["halts"] == {"manual": None, "all": None, "day": None}
+    assert ov["scanner"]["status"] == st["status"] and ov["halts"] == {"manual": None, "all": None, "day": None}
+    assert "session" in ov
+    state["updated"] = (datetime.now(TZ) - timedelta(hours=1)).isoformat()  # no check-in for an hour: stopped
+    (web.logs / "scan_state.json").write_text(json.dumps(state))
+    assert web.get("/api/state").json()["status"] == "stale"
 
 
 def test_kill_switch(web):

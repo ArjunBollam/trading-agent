@@ -12,7 +12,7 @@ from paperbot.config import ScanConfig
 from paperbot.features import Bar
 from paperbot.journal import Journal
 from paperbot.notify import Alerts
-from paperbot.patterns import analyze, rsi_series
+from paperbot.patterns import analyze, levels, rsi_series, session_vwaps
 from paperbot.robinhood import (
     READ_ONLY_TOOLS,
     Holding,
@@ -26,7 +26,7 @@ from paperbot.robinhood import (
     parse_option_holdings,
     parse_quotes,
 )
-from paperbot.scanner import Scanner, format_result, scan_forever
+from paperbot.scanner import Scanner, format_result, next_scan_start, scan_forever, weekdays_back
 
 TZ = ZoneInfo("America/New_York")
 TODAY, PREV = date(2026, 10, 26), date(2026, 10, 23)
@@ -146,8 +146,9 @@ class FakeSource:
         self.bars, self.holdings, self.options, self.calls = bars, holdings, list(options), []
         self.prices, self.marks, self.live_calls = {}, {}, 0
 
-    def snapshot(self, account, symbols, bar_minutes, intraday_start, daily_start):
+    def snapshot(self, account, symbols, bar_minutes, intraday_start, daily_start, extended=False):
         self.calls.append(daily_start)
+        self.extended = extended
         return Snapshot(self.holdings, self.bars, {}, self.options)
 
     def live(self, account, symbols, positions=None):
@@ -457,3 +458,87 @@ def test_the_page_gets_the_forming_candle_from_live_prices(cfg, tmp_path):
         scanner.tick()
     view = json.loads((tmp_path / "scan_state.json").read_text())["symbols"]["SPY"]
     assert view["forming"] == [int(at(TODAY, 10).timestamp()), 100.6, 100.9, 100.4, 100.7] and view["price"] == 100.7
+
+
+def bar_at(day: date, hh: int, mm: int, price: float, v: float = 1000, spread: float = 0.3) -> Bar:
+    return Bar(datetime(day.year, day.month, day.day, hh, mm, tzinfo=TZ), price, price + spread, price - spread, price, v)
+
+
+def test_extended_hours_leave_the_regular_session_levels_alone():
+    prev = prev_session() + [bar_at(PREV, 16, 30, 100, 50, spread=5)]  # an after-hours spike to 105 / 95
+    pre = [bar_at(TODAY, 8, 0, 100, 5000, spread=10)]  # a pre-market swing to 110 / 90 on heavy volume
+    reg = [Bar(at(TODAY, i), 100, 100.5, 99.5, 100, 1000) for i in range(8)]
+    post = [bar_at(TODAY, 16, 0, 120, 100)]
+    sup, res = levels(pre + reg, prev, 5)
+    lv = {x.name: x.price for x in sup + res}
+    assert lv["prior-day high"] == 101 and lv["prior-day low"] == 99 and lv["prior-day close"] == 100
+    assert lv["opening-range high"] == 100.5 and lv["high of day"] == 100.5 and lv["low of day"] == 99.5
+    vw = session_vwaps(pre + reg + post)
+    assert vw[0] is None and vw[-2] == pytest.approx(100) and vw[-1] == pytest.approx(100)  # after hours: the day's VWAP
+
+
+def test_live_price_is_the_latest_trade_in_or_out_of_hours():
+    prices, _ = parse_quotes([
+        {"quote": {"symbol": "SOXL", "last_trade_price": "101.09", "venue_last_trade_time": "2026-10-27T19:59:59.95Z",
+                   "last_non_reg_trade_price": "99.32", "venue_last_non_reg_trade_time": "2026-10-27T21:54:19.73Z"}},
+        {"quote": {"symbol": "SPY", "last_trade_price": "770", "venue_last_trade_time": "2026-10-27T15:00:00Z",
+                   "last_non_reg_trade_price": "765", "venue_last_non_reg_trade_time": "2026-10-27T12:00:00Z"}},
+        {"quote": {"symbol": "QQQ", "last_trade_price": "600"}},
+    ], [])
+    assert prices == {"SOXL": 99.32, "SPY": 770.0, "QQQ": 600.0}
+
+
+def test_bars_are_fetched_in_calls_small_enough_for_the_connector():
+    from paperbot.robinhood import symbols_per_call
+
+    monday = datetime(2026, 10, 26, 10, 0, tzinfo=TZ)
+    assert weekdays_back(monday, 2) == datetime(2026, 10, 22, 0, 0, tzinfo=TZ)  # Thursday and Friday warm up
+    assert symbols_per_call(5 * 192) == 2 and symbols_per_call(5 * 78) == 5 and symbols_per_call(5 * 960) == 1
+    assert symbols_per_call(10) == 10
+
+
+def test_next_scan_start():
+    friday_night = datetime(2026, 10, 30, 20, 30, tzinfo=TZ)
+    assert next_scan_start(friday_night, ["pre", "regular", "post"]) == datetime(2026, 11, 2, 4, 0, tzinfo=TZ)
+    assert next_scan_start(datetime(2026, 10, 26, 17, 0, tzinfo=TZ), ["regular"]) == datetime(2026, 10, 27, 9, 30, tzinfo=TZ)
+
+
+@pytest.mark.parametrize("sessions, start, scanned, until", [
+    (["regular"], (15, 50), ["15:50", "15:55", "16:00"], "Tue 09:30"),  # 16:00 scans the 15:55 candle
+    (["pre", "regular", "post"], (19, 50), ["19:50", "19:55", "20:00"], "Tue 04:00"),
+])
+def test_live_loop_scans_the_last_candle_then_waits_for_the_next_session(cfg, sessions, start, scanned, until):
+    cfg.scan.sessions, cfg.scan.tick_seconds = sessions, 0
+    bars = [bar_at(TODAY, 4 + i // 12, 5 * (i % 12), 100) for i in range(16 * 12)]  # 4:00 to 19:55
+    source = FakeSource({"SPY": bars}, [])
+    clock = [datetime(2026, 10, 26, *start, 5, tzinfo=TZ)]
+    scanner, _ = make_scanner(cfg, source, lambda: clock[0])
+    printed, waits = [], []
+
+    def sleep(seconds):
+        waits.append(seconds)
+        if len(waits) >= 4:
+            raise KeyboardInterrupt
+        clock[0] += timedelta(seconds=seconds)
+
+    with pytest.raises(KeyboardInterrupt):
+        scan_forever(scanner, print_fn=printed.append, sleep=sleep)
+    assert [p[19:24] for p in printed if p.startswith("Scan at")] == scanned
+    assert any(f"nothing to scan until {until} ET" in p for p in printed)
+    assert source.extended == (sessions != ["regular"])
+
+
+def test_live_loop_started_between_sessions_shows_the_last_session_without_alerting(cfg):
+    bars = [bar_at(TODAY, 4 + i // 12, 5 * (i % 12), 100 + (5 if i == 150 else 0)) for i in range(16 * 12)]
+    source = FakeSource({"SPY": bars}, [])
+    clock = [datetime(2026, 10, 27, 1, 0, 5, tzinfo=TZ)]  # after midnight: today has no candles yet
+    scanner, rec = make_scanner(cfg, source, lambda: clock[0])
+
+    def sleep(seconds):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        scan_forever(scanner, print_fn=lambda _: None, sleep=sleep)
+    view = scanner.view["SPY"]
+    assert len(view["bars"]) == 16 * 12 and view["bars"][0][6] == 1 and view["bars"][66][6] == 0  # pre-market, then 9:30
+    assert rec.sent == [] and "SPY" not in scanner.watch

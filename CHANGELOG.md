@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-10-27 (6:10 PM): pre-market and after-hours scanning
+
+- `scan.sessions` (default `[pre, regular, post]`): the live scanner runs 4:00–20:00 ET instead of stopping at
+  16:00, on Robinhood's extended-hours candles and the latest trade in or out of regular hours. VWAP, the
+  opening range, high and low of day and prior-day levels still come from the regular session; extended-hours
+  volume is compared with extended-hours volume. Editable on the web page's Settings tab.
+- The last candle of a session is now scanned when it closes. Before, the 15:55 candle never was.
+- The web page shows the session (Pre-market, Market open, After hours, Market closed). Between sessions the
+  scanner checks in every candle, so the page says "Scanner idle · resumes ..." instead of "live" with a stale
+  candle. Extended-hours candles are drawn faded.
+- Bars are fetched for the 3 sessions the scanner uses, in as many calls as it takes to keep each reply
+  under the connector's 1 MB message limit.
+
 ## 2026-10-27 (1:30 PM): the bigger picture, and tops and bottoms before they break
 
 - New `context.py`: every scan signal is checked against the last 3 hours and the 15-minute chart: chart

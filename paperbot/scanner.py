@@ -19,10 +19,10 @@ from pathlib import Path
 
 from .config import Config, ScanConfig
 from .context import Context, assess
-from .features import Bar, atr
+from .features import SESSIONS, Bar, atr, regular, session_of
 from .journal import Journal
 from .notify import Alerts
-from .patterns import ChartSignal, Level, Summary, analyze, levels
+from .patterns import ChartSignal, Level, Summary, analyze, levels, session_vwaps
 from .robinhood import Holding, MarketSource, OptionHolding, mask
 
 MARKET_OPEN, MARKET_CLOSE = time(9, 30), time(16, 0)
@@ -102,10 +102,12 @@ class Watch:
 
 
 def watch_levels(today: list[Bar], prev_session: list[Bar], bar_minutes: int, vwap: float | None) -> list[Level]:
-    """The scan's support and resistance levels, with high and low of day over every completed bar."""
+    """The scan's support and resistance levels, with high and low of day over every completed
+    regular-session bar (none before the open)."""
     sup, res = levels(today, prev_session, bar_minutes)
     out = {lv.name: lv.price for lv in sup + res if lv.name not in ("high of day", "low of day")}
-    out["high of day"], out["low of day"] = max(b.h for b in today), min(b.l for b in today)
+    if session := [b for b in today if regular(b)]:
+        out["high of day"], out["low of day"] = max(b.h for b in session), min(b.l for b in session)
     if vwap:
         out["VWAP"] = vwap
     return [Level(n, p) for n, p in out.items()]
@@ -171,8 +173,9 @@ class Scanner:
         need_daily = (self.daily is None or self.daily[0] != day
                       or bool(self.only and not self.only <= set(self.daily[1])))  # a symbol added since
         symbols = list(dict.fromkeys(sc.watchlist + sorted(self.only or ())))
-        snap = self.source.snapshot(self.account, symbols, sc.bar_minutes, now - timedelta(days=6),
-                                    now - timedelta(days=400) if need_daily else None)
+        snap = self.source.snapshot(self.account, symbols, sc.bar_minutes, weekdays_back(now, 2),
+                                    now - timedelta(days=400) if need_daily else None,
+                                    extended=bool({"pre", "post"} & set(sc.sessions)))
         self.positions = (now, snap.holdings, snap.options)
         self._seed(day)  # after the fetch, so a scan that finished meanwhile is seen
         if need_daily:
@@ -202,20 +205,28 @@ class Scanner:
             signals += [(sig, ctx) for sig in last_signals]
             summaries.append(summary)
             today_bars = [b for b in bars if b.t.date() == day]
+            # before today's first candle (overnight, or a restart then) the page shows the last session's
+            shown_day = day if today_bars or not sessions else sessions[-1]
+            shown = [b for b in bars if b.t.date() == shown_day]
+            vwap = summary.vwap if today_bars else (session_vwaps(shown) or [None])[-1]
             if summary.price is not None:
                 self.prices[sym] = summary.price
-            self.view[sym] = {"rsi": summary.rsi, "vwap": summary.vwap, "trend": summary.trend,
+            self.view[sym] = {"rsi": summary.rsi, "vwap": vwap, "trend": summary.trend,
                               "bar_time": summary.bar_time.isoformat() if summary.bar_time else None,
-                              "bars": [[int(b.t.timestamp()), b.o, b.h, b.l, b.c, b.v] for b in today_bars], "levels": [],
+                              "bars": [[int(b.t.timestamp()), b.o, b.h, b.l, b.c, b.v, 0 if regular(b) else 1]
+                                       for b in shown], "levels": [],  # the last item: pre-market or after hours
                               "context": {"bias": ctx.bias, "score": ctx.score,
                                           "factors": [{"side": f.side, "weight": f.weight, "text": f.text} for f in ctx.factors]}}
+            if shown:
+                prev_day = [b for b in bars if b.t.date() == max((d for d in sessions if d < shown_day), default=None)]
+                lv = watch_levels(shown, prev_day, sc.bar_minutes, vwap)
+                self.view[sym]["levels"] = [{"name": x.name, "price": round(x.price, 4)} for x in lv]
             if today_bars:
-                prev_day = [b for b in bars if b.t.date() == max((d for d in sessions if d < day), default=None)]
-                lv = watch_levels(today_bars, prev_day, sc.bar_minutes, summary.vwap)
                 buf = sc.min_cross_atr * (atr(bars[-30:]) or 0.0)
                 close = today_bars[-1].c
                 self.watch[sym] = Watch(lv, buf, {x.name: _side(close, x.price, buf) for x in lv}, close)
-                self.view[sym]["levels"] = [{"name": x.name, "price": round(x.price, 4)} for x in lv]
+            else:
+                self.watch.pop(sym, None)  # yesterday's levels would be named as today's
             new = []
             for sig, sig_ctx in signals:
                 last = self.last_fired.get(sig.key)
@@ -355,7 +366,8 @@ class Scanner:
         symbols = {s: v | {"price": self.prices.get(s), "forming": self._forming_for(s, v)}
                    for s, v in self.view.items() if not self.only or s in self.only}
         state = {"updated": now.isoformat(), "account": mask(self.account), "bar_minutes": sc.bar_minutes,
-                 "tick_seconds": sc.tick_seconds, "only": sorted(self.only) if self.only else None,
+                 "tick_seconds": sc.tick_seconds, "sessions": sc.sessions, "session": session_at(now),
+                 "only": sorted(self.only) if self.only else None,
                  "symbols": symbols, "no_data": self.no_data, "holdings": rows, "options": opts}
         try:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -394,6 +406,39 @@ def market_hours(now: datetime) -> bool:
     return now.weekday() < 5 and MARKET_OPEN <= now.time() < MARKET_CLOSE
 
 
+def weekdays_back(now: datetime, n: int) -> datetime:
+    """Midnight (market time) `n` weekdays before `now`'s day: where to start fetching intraday bars
+    for today plus n sessions of indicator warm-up (with a holiday in between, one fewer)."""
+    day = now.date()
+    while n:
+        day -= timedelta(days=1)
+        if day.weekday() < 5:
+            n -= 1
+    return datetime.combine(day, time(0), tzinfo=now.tzinfo)
+
+
+def session_at(now: datetime) -> str | None:
+    """The trading session at `now` (market time): pre, regular or post; None overnight and at weekends.
+    Holidays aren't known: on one, a scan finds no new candles."""
+    return session_of(now) if now.weekday() < 5 else None
+
+
+def scan_hours(now: datetime, sessions: list[str]) -> bool:
+    return session_at(now) in sessions
+
+
+def next_scan_start(now: datetime, sessions: list[str]) -> datetime:
+    """When the next of `sessions` starts after `now` (market time)."""
+    for days in range(8):
+        day = now.date() + timedelta(days=days)
+        if day.weekday() < 5:
+            for name, (start, _) in SESSIONS.items():
+                at = datetime.combine(day, start, tzinfo=now.tzinfo)
+                if name in sessions and at > now:
+                    return at
+    raise ValueError("no sessions to scan")
+
+
 def format_result(r: ScanResult) -> str:
     held = {h.symbol: h for h in r.holdings}
     optioned = {o.symbol for o in r.options}
@@ -429,9 +474,10 @@ def format_result(r: ScanResult) -> str:
 def scan_forever(scanner: Scanner, send_alerts: bool = True, print_fn: Callable[[str], None] = print,
                  sleep: Callable[[float], None] = time_.sleep, symbols: Callable[[], list[str]] | None = None,
                  settings: Callable[[], ScanConfig] | None = None) -> None:
-    """Scan just after each bar closes during market hours and, with scan.tick_seconds, check the live
-    price that often in between (Scanner.tick). `symbols` (a LiveList's) and `settings` (Overrides')
-    are read before every check: a change applies at once. Ctrl-C to stop."""
+    """Scan just after each bar closes during scan.sessions (pre-market, regular hours, after hours)
+    and, with scan.tick_seconds, check the live price that often in between (Scanner.tick). The last
+    bar of a session is scanned when it closes, just after the session ends. `symbols` (a LiveList's)
+    and `settings` (Overrides') are read before every check: a change applies at once. Ctrl-C to stop."""
     closed_noted, scanned_bar = False, None
     while True:
         now = scanner.now().astimezone(scanner.cfg.schedule.tz)
@@ -445,24 +491,31 @@ def scan_forever(scanner: Scanner, send_alerts: bool = True, print_fn: Callable[
             if want != scanner.only:
                 scanner.only, scanned_bar = want, None  # scan the new list now, not at the next bar
                 print_fn(f"{now:%H:%M:%S} live symbols: {', '.join(sorted(want)) if want else 'everything held'}")
-        if market_hours(now):
-            closed_noted = False
+        sessions = scanner.cfg.scan.sessions
+        open_now = scan_hours(now, sessions)
+        closing = not open_now and scan_hours(bar - timedelta(minutes=minutes), sessions)  # its last bar just closed
+        if open_now or closing or scanned_bar is None:
             try:
                 if bar != scanned_bar:  # a bar has closed since the last scan
-                    print_fn(format_result(scanner.scan(send_alerts)))
+                    # started between sessions: a scan just for the page and the log, as its signals are old
+                    print_fn(format_result(scanner.scan(send_alerts and (open_now or closing))))
                     scanned_bar = bar
-                elif tick:
+                elif tick and open_now:
                     print_fn(scanner.tick(send_alerts))
             except Exception as e:  # a network or sign-in hiccup shouldn't end a day of scanning
                 scanner.journal.log("scan_failed", error=repr(e))
                 print_fn(f"scan failed: {e!r}")
-        elif not closed_noted:
-            print_fn(f"{now:%H:%M} ET: market closed; waiting for the open.")
-            closed_noted = True
+        if open_now:
+            closed_noted = False
+        else:
+            if not closed_noted:
+                print_fn(f"{now:%H:%M} ET: nothing to scan until {next_scan_start(now, sessions):%a %H:%M} ET.")
+                closed_noted = True
+            scanner.publish(now)  # so the web page can tell a waiting scanner from a stopped one
         now = scanner.now().astimezone(scanner.cfg.schedule.tz)
         bar = now.replace(second=0, microsecond=0) - timedelta(minutes=now.minute % minutes)
         nxt = bar + timedelta(minutes=minutes)
-        if tick and market_hours(now):
+        if tick and scan_hours(now, sessions):
             elapsed = (now - bar).total_seconds()
             nxt = min(nxt, bar + timedelta(seconds=(elapsed // tick + 1) * tick))
         sleep(max(1.0, (nxt - now).total_seconds() + 5))  # a few seconds for the bar to be published

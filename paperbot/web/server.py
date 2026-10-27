@@ -37,7 +37,7 @@ from ..livelist import LiveList
 from ..overrides import NOT_HERE, Overrides
 from ..patterns import LABELS
 from ..risk import KillSwitch
-from ..scanner import market_hours
+from ..scanner import market_hours, next_scan_start, scan_hours, session_at
 
 STATIC = Path(__file__).parent / "static"
 
@@ -143,9 +143,15 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
         except (OSError, ValueError):
             return {"status": "off", "detail": "the live scanner hasn't written its state yet", "market_open": market_hours(now)}
         age = (now - datetime.fromisoformat(state["updated"])).total_seconds()
-        expected = (state.get("tick_seconds") or 0) or state.get("bar_minutes", 5) * 60
-        running = age <= max(3 * expected, 90) if market_hours(now) else age <= 6 * 3600
-        state |= {"status": "running" if running else "stale", "age_seconds": round(age), "market_open": market_hours(now)}
+        sessions = state.get("sessions") or ["regular"]
+        bar = state.get("bar_minutes", 5) * 60
+        if scan_hours(now, sessions):
+            expected = (state.get("tick_seconds") or 0) or bar
+            status = "running" if age <= max(3 * expected, 90) else "stale"
+        else:  # between sessions the scanner checks in once a candle
+            status = "idle" if age <= 2 * bar + 120 else "stale"
+            state["resumes"] = next_scan_start(now, sessions).isoformat()
+        state |= {"status": status, "age_seconds": round(age), "market_open": market_hours(now)}
         return state
 
     async def state(request: Request) -> Response:
@@ -326,7 +332,7 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
         now = now or datetime.now(c.schedule.tz)
         scanner = scanner_state(c)
         return {"version": version(), "now": now.isoformat(), "market_open": market_hours(now),
-                "scanner": scanner, "live_symbols": live_list(c).info(), "halts": halts(c)}
+                "session": session_at(now), "scanner": scanner, "live_symbols": live_list(c).info(), "halts": halts(c)}
 
     def page_snapshot(c: Config) -> dict:
         now = datetime.now(c.schedule.tz)

@@ -28,7 +28,7 @@ from datetime import date, datetime, time, timedelta
 
 from . import formations
 from .config import ScanConfig
-from .features import Bar, atr
+from .features import SESSION_CLOSE, Bar, atr, regular, session_of
 
 LABELS = {
     "vwap_reclaim": "VWAP reclaim", "vwap_lost": "Lost VWAP",
@@ -161,18 +161,24 @@ def sma(values: list[float], n: int) -> float | None:
 
 
 def session_vwaps(today: list[Bar]) -> list[float | None]:
+    """VWAP after each of today's bars, over the regular session only: None before the open, and
+    the day's closing VWAP through after-hours bars."""
     out, pv, vol = [], 0.0, 0.0
     for b in today:
-        pv += (b.h + b.l + b.c) / 3 * b.v
-        vol += b.v
+        if regular(b):
+            pv += (b.h + b.l + b.c) / 3 * b.v
+            vol += b.v
         out.append(pv / vol if vol > 0 else None)
     return out
 
 
 def levels(today: list[Bar], prev_session: list[Bar], bar_minutes: int) -> tuple[list[Level], list[Level]]:
-    """(supports, resistances) known before the last bar, so the last bar can test or break them."""
+    """(supports, resistances) known before the last bar, so the last bar can test or break them.
+    Prior-day levels, the opening range and the high and low of day come from regular-session
+    bars, so pre-market and after-hours trading don't move them."""
     sup: list[Level] = []
     res: list[Level] = []
+    prev_session = [b for b in prev_session if regular(b)]
     if prev_session:
         h, lo, c = max(b.h for b in prev_session), min(b.l for b in prev_session), prev_session[-1].c
         p = (h + lo + c) / 3
@@ -181,11 +187,12 @@ def levels(today: list[Bar], prev_session: list[Bar], bar_minutes: int) -> tuple
         res += [Level("prior-day high", h), Level("prior-day close", c), Level("pivot R1", 2 * p - lo),
                 Level("pivot R2", p + (h - lo))]
     or_bars = max(1, 15 // bar_minutes)
-    if len(today) > or_bars:  # the opening range is complete before the last bar
-        rng = today[:or_bars]
+    known = [b for b in today[:-1] if regular(b)]
+    if len(known) >= or_bars:  # the opening range is complete before the last bar
+        rng = known[:or_bars]
         sup.append(Level("opening-range low", min(b.l for b in rng)))
         res.append(Level("opening-range high", max(b.h for b in rng)))
-    earlier = today[:-3]  # a swing needs a few bars of distance from the bar testing it
+    earlier = [b for b in today[:-3] if regular(b)]  # a swing needs a few bars of distance from the bar testing it
     if len(earlier) > or_bars:
         sup.append(Level("low of day", min(b.l for b in earlier)))
         res.append(Level("high of day", max(b.h for b in earlier)))
@@ -213,7 +220,8 @@ def _crossed_down(prev_a, prev_b, a, b) -> bool:
 def analyze(symbol: str, bars: list[Bar], day: date, cfg: ScanConfig, daily: list[Bar] | None = None,
             ) -> tuple[list[ChartSignal], Summary]:
     """Signals on the last bar of `bars` (completed bars, oldest first). Bars from earlier sessions
-    warm up the indicators; VWAP, the opening range and today's high/low use today's bars only.
+    warm up the indicators; VWAP, the opening range and today's high/low use today's regular-session
+    bars only. Pre-market and after-hours bars, when there are any, count for everything else.
     `daily` (completed daily bars before today) adds the daily signals."""
     if not bars:
         return [], Summary(symbol, None, None)
@@ -299,11 +307,14 @@ def analyze(symbol: str, bars: list[Bar], day: date, cfg: ScanConfig, daily: lis
             elif last.c < lower:
                 add("squeeze_breakout_down", "sell", f"bands were at their narrowest in {len(widths)} bars; closed below {lower:.2f}")
 
-    # Volume against the previous 20 bars. The opening bar and the closing auction always spike, so they're skipped.
-    window = [b.v for b in bars[-21:-1]]
+    # Volume against the previous 20 bars of the same kind: regular-session bars against regular ones,
+    # pre-market and after-hours bars against extended-hours ones, which trade far less. A session's
+    # first bar and the closing auction always spike, so they're skipped.
+    window = [b.v for b in bars[:-1] if regular(b) == regular(last)][-20:]
     vol_ratio = last.v / (sum(window) / len(window)) if len(window) >= 10 and sum(window) > 0 else None
-    auction = last.t.time() >= CLOSING_AUCTION
-    if vol_ratio is not None and len(today) > 1 and not auction and vol_ratio >= cfg.volume_spike_ratio and last.c != last.o:
+    auction = CLOSING_AUCTION <= last.t.time() < SESSION_CLOSE
+    first = prev.t.date() != last.t.date() or session_of(prev.t) != session_of(last.t)
+    if vol_ratio is not None and not first and not auction and vol_ratio >= cfg.volume_spike_ratio and last.c != last.o:
         up = last.c > last.o
         add("volume_spike_up" if up else "volume_spike_down", "buy" if up else "sell",
             f"volume {vol_ratio:.1f}x the 20-bar average on a {'green' if up else 'red'} bar")

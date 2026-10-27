@@ -288,7 +288,7 @@ launchctl bootout gui/$(id -u)/com.paperbot.scan
 ```
 
 A second job (`~/Library/LaunchAgents/com.paperbot.spy-live.plist`) runs `paperbot scan --live` all the
-time: it starts at login, restarts if it crashes, and sleeps outside market hours. Its log is
+time: it starts at login, restarts if it crashes, and sleeps between the sessions it scans. Its log is
 `~/Library/Logs/paperbot/spy-live.log`, outside Downloads, because launchd can't open a log file inside
 Downloads that another app created. To watch it, and to stop it:
 
@@ -300,9 +300,14 @@ tail -f ~/Library/Logs/paperbot/spy-live.log
 launchctl bootout gui/$(id -u)/com.paperbot.spy-live
 ```
 
-`--live` scans a few seconds after each 5-minute bar closes, 9:30–16:00 ET, and sends alerts through your
-ntfy or Telegram setup. Everything it does comes from the `scan:` block in `config.yaml`:
+`--live` scans a few seconds after each 5-minute bar closes, 4:00–20:00 ET on weekdays, and sends alerts
+through your ntfy or Telegram setup. Everything it does comes from the `scan:` block in `config.yaml`:
 
+- `sessions: [pre, regular, post]` is when it runs: pre-market (4:00–9:30), regular hours (9:30–16:00)
+  and after hours (16:00–20:00). The last candle of a session is scanned when it closes. Pre-market and
+  after-hours candles count for indicators and patterns, and their volume is compared with other
+  extended-hours candles. VWAP, the opening range, the high and low of day and the prior day's levels
+  always come from regular hours. Robinhood's overnight session (20:00–4:00) isn't scanned.
 - `live_symbols: [SPY]` is what it scans (empty: everything you hold plus the watchlist).
 - `tick_seconds: 10` also checks the live price every 10 seconds between candle closes (read-only
   `get_equity_quotes` and `get_option_quotes`); `live_positions_seconds: 60` re-reads positions at most

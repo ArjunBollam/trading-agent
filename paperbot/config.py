@@ -234,6 +234,9 @@ class ScanConfig(BaseModel):
     tick_seconds: int = Field(0, ge=0, le=300, description="Between candle closes, check the live price this often (0 = off)")
     tick_cooldown_minutes: int = Field(10, ge=0, description="The same live level cross, at most this often")
     live_positions_seconds: int = Field(60, ge=0, description="Live checks re-read your positions at most this often")
+    sessions: list[Literal["pre", "regular", "post"]] = Field(
+        ["pre", "regular", "post"], min_length=1, description=(
+            "When the scanner runs, weekdays ET: pre-market 4:00-9:30 AM, regular 9:30 AM-4:00 PM, after hours 4:00-8:00 PM"))
     # Chart patterns (formations.py), in thinkorswim's groups. Names for the two lists are the pattern kinds
     # (`paperbot patterns` lists them), e.g. doji, double_top, williams_fractal_high.
     pattern_groups: list[Literal["classic", "candlestick", "fibonacci"]] = Field(

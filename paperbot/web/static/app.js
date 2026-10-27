@@ -16,6 +16,8 @@ const tone = (x) => (x == null || x === 0 ? "" : x > 0 ? "up" : "down");
 const etTime = (d, seconds = false) =>
   d.toLocaleTimeString("en-US", { timeZone: ET, hour: "2-digit", minute: "2-digit", second: seconds ? "2-digit" : undefined, hour12: false });
 const hm = (iso) => (iso ? etTime(new Date(iso)) : "");
+const etDay = (d) => d.toLocaleDateString("en-US", { timeZone: ET, weekday: "short" });
+const SESSION_NAMES = { pre: "pre-market", regular: "regular hours", post: "after hours" };
 
 async function api(path, opts = {}) {
   const init = { method: opts.method || "GET", headers: {} };
@@ -81,11 +83,16 @@ function renderPills(ov) {
   const sc = ov.scanner;
   const ps = $("#pill-scanner");
   const ago = sc.age_seconds != null ? ` · ${sc.age_seconds < 90 ? sc.age_seconds + "s" : Math.round(sc.age_seconds / 60) + "m"} ago` : "";
-  ps.textContent = sc.status === "running" ? `Scanner live${ago}` : sc.status === "stale" ? `Scanner stale${ago}` : "Scanner off";
-  ps.className = "pill " + (sc.status === "running" ? "ok" : sc.status === "stale" ? "warn" : "bad");
+  const resumes = sc.resumes ? new Date(sc.resumes) : null;
+  const when = resumes ? `${etDay(resumes) === etDay(new Date()) ? "" : etDay(resumes) + " "}${etTime(resumes)}` : "";
+  ps.textContent = sc.status === "running" ? `Scanner live${ago}` : sc.status === "idle" ? `Scanner idle · resumes ${when} ET`
+    : sc.status === "stale" ? `Scanner stale${ago}` : "Scanner off";
+  ps.className = "pill " + (sc.status === "running" ? "ok" : sc.status === "idle" ? "" : sc.status === "stale" ? "warn" : "bad");
+  ps.title = sc.status === "idle" ? `Between the sessions it scans (${(sc.sessions || []).map((x) => SESSION_NAMES[x]).join(", ")}); change them in Settings`
+    : "The live scanner (launchd job com.paperbot.spy-live)";
   const pm = $("#pill-market");
-  pm.textContent = ov.market_open ? "Market open" : "Market closed";
-  pm.className = "pill " + (ov.market_open ? "ok" : "");
+  pm.textContent = { pre: "Pre-market", regular: "Market open", post: "After hours" }[ov.session] || "Market closed";
+  pm.className = "pill " + (ov.session === "regular" ? "ok" : ov.session ? "warn" : "");
   const h = ov.halts;
   const halted = h.all || h.manual || h.day;
   const ph = $("#pill-halt");
@@ -301,6 +308,13 @@ function renderCards() {
   });
 }
 
+// pre-market and after-hours candles are drawn faded, as on most charts
+function extColors(up, extended) {
+  if (!extended) return {};
+  const c = up ? "rgba(34,197,94,.4)" : "rgba(239,68,68,.4)";
+  return { color: c, wickColor: c, borderColor: c };
+}
+
 function updateCard(card, sym, v) {
   const el = card.el;
   const noData = (lastState.no_data || []).includes(sym);
@@ -322,7 +336,8 @@ function updateCard(card, sym, v) {
   $(".rsi", el).textContent = num(v.rsi, 1);
   $(".trend", el).textContent = v.trend || "–";
   $(".trend", el).className = "trend " + (v.trend === "up" ? "up" : v.trend === "down" ? "down" : "");
-  $(".bar", el).textContent = v.forming ? `${etTime(new Date(v.forming[0] * 1000))} candle forming`
+  const ext = lastState.session && lastState.session !== "regular" ? ` · ${SESSION_NAMES[lastState.session]}` : "";
+  $(".bar", el).textContent = v.forming ? `${etTime(new Date(v.forming[0] * 1000))} candle forming${ext}`
     : v.bar_time ? `last candle ${hm(v.bar_time)}` : "";
   const ctx = v.context;
   $(".ctx", el).hidden = !ctx;
@@ -348,8 +363,8 @@ function updateCard(card, sym, v) {
   const barKey = bars.length ? `${bars.length}|${bars[bars.length - 1][0]}|${bars[bars.length - 1][4]}` : "";
   if (barKey !== card.keys.bars) {
     card.keys.bars = barKey;
-    card.candles.setData(bars.map((b) => ({ time: b[0], open: b[1], high: b[2], low: b[3], close: b[4] })));
-    card.volume.setData(bars.map((b) => ({ time: b[0], value: b[5], color: b[4] >= b[1] ? "rgba(34,197,94,.35)" : "rgba(239,68,68,.35)" })));
+    card.candles.setData(bars.map((b) => ({ time: b[0], open: b[1], high: b[2], low: b[3], close: b[4], ...extColors(b[4] >= b[1], b[6]) })));
+    card.volume.setData(bars.map((b) => ({ time: b[0], value: b[5], color: b[4] >= b[1] ? `rgba(34,197,94,${b[6] ? 0.15 : 0.35})` : `rgba(239,68,68,${b[6] ? 0.15 : 0.35})` })));
     if (!card.fitted && bars.length) {
       card.fitted = true;
       setTimeout(() => card.chart.timeScale().fitContent(), 300); // once autoSize has given the chart its width
@@ -358,7 +373,8 @@ function updateCard(card, sym, v) {
   // the candle still forming, from the scanner's live checks: it moves with every refresh
   const f = v.forming;
   if (f && (!bars.length || f[0] > bars[bars.length - 1][0])) {
-    card.candles.update({ time: f[0], open: f[1], high: f[2], low: f[3], close: f[4] });
+    card.candles.update({ time: f[0], open: f[1], high: f[2], low: f[3], close: f[4],
+      ...extColors(f[4] >= f[1], lastState.session && lastState.session !== "regular") });
   }
   // signal markers, snapped to the candle they belong to
   const mkKey = lastSignals.filter((s) => s.symbol === sym).map(signalId).join(",") + barKey;
@@ -633,6 +649,9 @@ function fieldInput(key, spec, value) {
     const min = spec.minimum ?? spec.exclusiveMinimum, max = spec.maximum ?? spec.exclusiveMaximum;
     return `<input type="number" name="${key}" value="${value}" step="${spec.type === "integer" ? 1 : "any"}"${min != null ? ` min="${min}"` : ""}${max != null ? ` max="${max}"` : ""}>`;
   }
+  if (spec.type === "array" && spec.items?.enum) {
+    return `<span class="checks">${spec.items.enum.map((x) => `<label><input type="checkbox" name="${key}" value="${x}"${(value || []).includes(x) ? " checked" : ""}> ${x}</label>`).join(" ")}</span>`;
+  }
   if (spec.type === "array") return `<input type="text" class="wide" name="${key}" value="${esc((value || []).join(", "))}" placeholder="comma-separated">`;
   return `<input type="text" name="${key}" value="${esc(value)}">`;
 }
@@ -658,6 +677,7 @@ function readField(key) {
   const spec = setData.fields[key];
   const el = $(`#set-form [name="${key}"]`);
   if (spec.type === "boolean") return el.checked;
+  if (spec.type === "array" && spec.items?.enum) return $$(`#set-form [name="${key}"]`).filter((x) => x.checked).map((x) => x.value);
   if (spec.type === "array") return el.value.split(/[\s,]+/).filter(Boolean).map((x) => x.toUpperCase());
   if (spec.type === "integer" || (spec.enum || spec.allOf) && typeof setData.effective[key] === "number") return parseInt(el.value, 10);
   if (spec.type === "number") return parseFloat(el.value);

@@ -125,6 +125,9 @@ scan:                             # `paperbot scan`: read-only chart signals on 
   tick_seconds: 10                # between candle closes, check the live price this often (0 = off)
   tick_cooldown_minutes: 10       # the same live level cross, at most this often
   live_positions_seconds: 60      # live checks re-read your positions at most this often
+  # When the scanner runs, weekdays ET: pre (4:00-9:30 AM), regular (9:30 AM-4:00 PM), post (4:00-8:00 PM).
+  # VWAP, the opening range, high/low of day and prior-day levels always come from regular hours.
+  sessions: [pre, regular, post]
 
   # Chart patterns, grouped like thinkorswim's tabs. `paperbot patterns` lists every name and what it does.
   pattern_groups: [classic, candlestick, fibonacci]

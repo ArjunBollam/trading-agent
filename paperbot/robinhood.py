@@ -31,6 +31,13 @@ READ_ONLY_TOOLS = frozenset({"get_accounts", "get_equity_positions", "get_equity
                              "get_option_quotes"})
 TOKEN_PATH = Path.home() / ".config" / "paperbot" / "robinhood-oauth.json"
 INTERVALS = {1: "minute", 5: "5minute", 10: "10minute", 30: "30minute"}
+# Bars per request: a bigger reply can pass the MCP client's 1 MB message limit (one bar is ~350 bytes
+# on the wire). Symbols are split into as many calls as that takes, up to the server's 10 a call.
+MAX_BARS_PER_CALL = 2000
+
+
+def symbols_per_call(bars_each: int) -> int:
+    return max(1, min(10, MAX_BARS_PER_CALL // max(bars_each, 1)))
 
 
 class ReadOnlyViolation(RuntimeError):
@@ -89,7 +96,7 @@ class Live:
 
 class MarketSource(Protocol):
     def snapshot(self, account: str, symbols: list[str], bar_minutes: int, intraday_start: datetime,
-                 daily_start: datetime | None) -> Snapshot: ...
+                 daily_start: datetime | None, extended: bool = False) -> Snapshot: ...
 
     def live(self, account: str, symbols: list[str],
              positions: tuple[list[Holding], list[OptionHolding]] | None = None) -> Live: ...
@@ -141,12 +148,16 @@ def parse_option_holdings(positions: list[dict], instruments: dict[str, dict]) -
 
 
 def parse_quotes(equity: list[dict], options: list[dict]) -> tuple[dict[str, float], dict[str, float]]:
-    """Last trade per symbol and mark per option contract; entries without a price are left out."""
+    """Last trade per symbol (in the regular session or pre-market and after hours, whichever printed
+    last) and mark per option contract; entries without a price are left out."""
     prices = {}
     for r in equity:
         q = r.get("quote") or {}
-        if q.get("last_trade_price"):
-            prices[q["symbol"]] = float(q["last_trade_price"])
+        trades = [(q.get(at) or "", float(q[p])) for p, at in (("last_trade_price", "venue_last_trade_time"),
+                                                                ("last_non_reg_trade_price", "venue_last_non_reg_trade_time"))
+                  if q.get(p)]
+        if trades:
+            prices[q["symbol"]] = max(trades)[1]  # RFC 3339 UTC times compare as text
     marks = {}
     for r in options:
         q = r.get("quote") or {}
@@ -297,21 +308,28 @@ class RobinhoodMCP:
         return asyncio.run(self._with_client(work))
 
     def snapshot(self, account: str, symbols: list[str], bar_minutes: int, intraday_start: datetime,
-                 daily_start: datetime | None) -> Snapshot:
+                 daily_start: datetime | None, extended: bool = False) -> Snapshot:
+        """With `extended`, the intraday bars include pre-market and after-hours trading; daily bars
+        are always the regular session's."""
         async def work(call):
             holdings, options = await _positions(call, account)
             wanted = list(dict.fromkeys([h.symbol for h in holdings] + [o.symbol for o in options]
                                         + [s.upper() for s in symbols]))
             bars: dict[str, list[Bar]] = {}
             daily: dict[str, list[Bar]] = {}
-            for i in range(0, len(wanted), 10):  # the server takes up to 10 symbols a call
-                chunk = wanted[i:i + 10]
+            now = datetime.now(UTC)
+            days = (now - intraday_start).days + 1  # calendar days, so weekends make this an overestimate
+            n = symbols_per_call(days * (16 * 60 if extended else 390) // bar_minutes)
+            for i in range(0, len(wanted), n):
                 data = await call("get_equity_historicals", {
-                    "symbols": chunk, "interval": INTERVALS[bar_minutes], "start_time": _rfc3339(intraday_start)})
+                    "symbols": wanted[i:i + n], "interval": INTERVALS[bar_minutes], "start_time": _rfc3339(intraday_start),
+                    "bounds": "extended" if extended else "regular"})
                 bars |= parse_bars(data.get("results") or [])
-                if daily_start is not None:
+            if daily_start is not None:
+                n = symbols_per_call((now - daily_start).days * 5 // 7 + 1)
+                for i in range(0, len(wanted), n):
                     data = await call("get_equity_historicals", {
-                        "symbols": chunk, "interval": "day", "start_time": _rfc3339(daily_start)})
+                        "symbols": wanted[i:i + n], "interval": "day", "start_time": _rfc3339(daily_start)})
                     daily |= parse_bars(data.get("results") or [])
             return Snapshot(holdings, bars, daily, options)
         return asyncio.run(self._with_client(work))

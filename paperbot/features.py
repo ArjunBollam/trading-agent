@@ -16,6 +16,9 @@ from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 SESSION_OPEN = time(9, 30)
+SESSION_CLOSE = time(16, 0)
+# Trading sessions (market time, weekdays): pre-market, the regular session and after hours.
+SESSIONS = {"pre": (time(4, 0), SESSION_OPEN), "regular": (SESSION_OPEN, SESSION_CLOSE), "post": (SESSION_CLOSE, time(20, 0))}
 OPENING_RANGE_END = time(9, 45)
 FIRST_HALF_HOUR_END = time(10, 0)
 STRONG_OPEN_ALERT_CUTOFF = time(10, 30)  # after this, a "strong open" is old news, not a setup
@@ -100,6 +103,16 @@ def atr(bars: list[Bar], n: int = 14) -> float | None:
     for tr in trs[n:]:
         a = (a * (n - 1) + tr) / n
     return a
+
+
+def session_of(t: datetime) -> str | None:
+    """pre, regular or post for a time in market time, by the clock alone (weekends and holidays
+    aren't checked); None overnight."""
+    return next((name for name, (start, end) in SESSIONS.items() if start <= t.time() < end), None)
+
+
+def regular(b: Bar) -> bool:
+    return session_of(b.t) == "regular"
 
 
 def session_start(now: datetime, tz: ZoneInfo) -> datetime:
