@@ -341,7 +341,7 @@ The signals ([patterns.py](paperbot/patterns.py)), on completed 5-minute bars on
 | Group | Signals |
 |---|---|
 | VWAP | reclaim, loss, bounce off it, rejection at it (the low or high within `vwap_touch_atr`, 0.1 ATR, of VWAP) |
-| RSI(14) | into oversold (< 30) or overbought (> 70), and back out; into extremely oversold (< 15) or overbought (> 78). An extreme RSI on a signal's candle overrides it: under 15, sell signals and live moves down are held back from your phone (logged, and tagged "held back" on the page) and buy signals go out at high priority without the bigger-picture warning; over 78, the other way round (`rsi_extreme_low`, `rsi_extreme_high`, `rsi_extreme_override`) |
+| RSI(14) | into oversold (< 30) or overbought (> 70), and back out |
 | Trend | EMA 9/21 cross, MACD (12, 26, 9) signal-line cross |
 | Bollinger (20, 2) | close back inside a band; a squeeze that breaks out |
 | Support / resistance | a test that held, and breakouts and breakdowns with a volume check. Levels: prior-day high, low and close, classic pivots (R1/R2, S1/S2), the 15-minute opening range, and the high and low of day |

@@ -167,16 +167,14 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
                              "detail": e.get("detail"), "level": e.get("level"), "held": e.get("held"),
                              "against": e.get("against_position"), "weak": bool(e.get("weak", e["kind"] in quiet)), "live": False,
                              "context": e.get("context"), "context_score": e.get("context_score"),
-                             "conflict": e.get("conflict"), "rsi": e.get("rsi"), "rsi_extreme": e.get("rsi_extreme"),
-                             "held_back": bool(e.get("held_back"))})
+                             "conflict": e.get("conflict")})
             elif e.get("event") == "live_cross":
                 rows.append({"ts": e["ts"], "time": e["ts"], "symbol": e["symbol"], "kind": "live_cross",
                              "label": f"LIVE {'above' if e['side'] == 'buy' else 'below'} {e['level']}",
                              "side": e["side"], "price": e["price"],
                              "detail": f"crossed the {e['level']} {e['level_price']:.2f} inside the forming candle",
                              "level": e["level"], "held": None, "against": e.get("against_position"), "weak": False,
-                             "live": True, "rsi": e.get("rsi"), "rsi_extreme": e.get("rsi_extreme"),
-                             "held_back": bool(e.get("held_back"))})
+                             "live": True})
         rows.sort(key=lambda r: r["ts"], reverse=True)
         return rows
 

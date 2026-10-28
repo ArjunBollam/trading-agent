@@ -9,11 +9,10 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from paperbot.config import ScanConfig
-from paperbot.context import Context, Factor
 from paperbot.features import Bar, atr
 from paperbot.journal import Journal
 from paperbot.notify import Alerts
-from paperbot.patterns import ChartSignal, analyze, levels, rsi_series, session_vwaps
+from paperbot.patterns import analyze, levels, rsi_series, session_vwaps
 from paperbot.robinhood import (
     READ_ONLY_TOOLS,
     Holding,
@@ -27,15 +26,7 @@ from paperbot.robinhood import (
     parse_option_holdings,
     parse_quotes,
 )
-from paperbot.scanner import (
-    Found,
-    Scanner,
-    format_result,
-    next_scan_start,
-    rsi_extreme,
-    scan_forever,
-    weekdays_back,
-)
+from paperbot.scanner import Scanner, format_result, next_scan_start, scan_forever, weekdays_back
 
 TZ = ZoneInfo("America/New_York")
 TODAY, PREV = date(2026, 10, 26), date(2026, 10, 23)
@@ -99,74 +90,6 @@ def test_rsi_oversold_fires_once_as_an_event():
     assert len(hits) == 1
     r = rsi_series([b.c for b in bars[:hits[0]]])
     assert r[-2] >= 30 > r[-1]
-
-
-def test_extreme_rsi_fires_once_and_every_signal_carries_its_candles_rsi():
-    today, price = [], 100.0
-    for i in range(30):
-        price -= 0.25
-        today.append(Bar(at(TODAY, i), price + 0.25, price + 0.3, price - 0.05, price, 1000))
-    bars = prev_session() + today
-    hits = [n for n in range(len(prev_session()) + 2, len(bars) + 1) if "rsi_extreme_oversold" in kinds(bars[:n])]
-    assert len(hits) == 1
-    r = rsi_series([b.c for b in bars[:hits[0]]])
-    assert r[-2] >= SC.rsi_extreme_low > r[-1]
-    sigs, _ = analyze("T", bars[:hits[0]], TODAY, SC)
-    assert all(s.rsi == r[-1] for s in sigs)
-    assert "sell signals are held back" in next(s.detail for s in sigs if s.kind == "rsi_extreme_oversold")
-
-
-def test_extreme_rsi_holds_the_other_side_back_and_overrides_the_bigger_picture():
-    assert (rsi_extreme(14.9, SC), rsi_extreme(15, SC), rsi_extreme(78, SC), rsi_extreme(78.1, SC)) == (
-        "oversold", None, None, "overbought")
-    assert rsi_extreme(5, SC.model_copy(update={"rsi_extreme_override": False})) is None
-    bearish = Context((Factor(-1, 3, "double top broke down at 10:00 through 99.50, still below it"),), 3, 180)
-    buy = ChartSignal("T", "support_test", "buy", 99.0, at(TODAY, 5), "tested the low of day", rsi=12.3)
-    sell = ChartSignal("T", "breakdown", "sell", 99.0, at(TODAY, 5), "closed below the prior-day low", rsi=12.3)
-    assert Found(buy, None, (), bearish).conflict  # without the override, the bigger picture flags it
-    f = Found(buy, None, (), bearish, "oversold")
-    assert not f.held_back and f.conflict is None and "WARNING" not in f.text()
-    assert "RSI 12.3 is extremely oversold and this buy signal goes with it, so it takes priority." in f.text()
-    f = Found(sell, None, (), bearish, "oversold")
-    assert f.held_back
-    assert "Held back from your phone: RSI 12.3 is extremely oversold, which overrides this sell signal." in f.text()
-
-
-@pytest.mark.parametrize("override", [True, False])
-def test_scanner_holds_back_a_signal_an_extreme_rsi_overrides(cfg, override):
-    bars = breakout_bars()
-    r = rsi_series([b.c for b in bars])
-    assert r[-2] < r[-1] - 1 and r[-1] > 52
-    # the breakout candle counts as extremely overbought, so the breakout (a buy) is held back
-    cfg.scan = cfg.scan.model_copy(update={"rsi_extreme_high": r[-1] - 1, "rsi_extreme_override": override})
-    clock = [at(TODAY, 11) + timedelta(seconds=10)]
-    scanner, rec = make_scanner(cfg, FakeSource({"NVDA": bars}, []), lambda: clock[0])
-    b = next(f for f in scanner.scan().found if f.signal.kind == "breakout")
-    logged = next(e for e in scanner.journal.events(TODAY, "chart_signal") if e["kind"] == "breakout")
-    assert b.held_back == logged["held_back"] == override
-    if override:
-        assert all("Breakout" not in m for _, m, _ in rec.sent)
-        title, message, priority = rec.sent[0]  # the extreme RSI itself is a sell signal, and it takes priority
-        assert title == f"SELL · RSI {r[-1]:.0f} extremely overbought: NVDA" and priority == "high"
-        assert "RSI extremely overbought" in message
-    else:
-        assert any("Breakout" in m for _, m, _ in rec.sent)
-
-
-def test_live_cross_against_an_extreme_rsi_is_held_back(cfg):
-    source = FakeSource({"SPY": breakout_bars()[:-1]}, [])
-    clock = [at(TODAY, 10) + timedelta(seconds=5)]
-    scanner, rec = make_scanner(cfg, source, lambda: clock[0])
-    scanner.scan()
-    scanner.view["SPY"]["rsi"] = 85.0  # as if the last candle were extremely overbought
-    sent = len(rec.sent)
-    source.prices = {"SPY": 101.4}  # through the prior-day high (101): a buy move
-    clock[0] += timedelta(minutes=1)
-    out = scanner.tick()
-    assert "crossed above the prior-day high" in out
-    assert "Held back from your phone: RSI 85.0 is extremely overbought, which overrides this buy move." in out
-    assert len(rec.sent) == sent
-    assert next(e for e in scanner.journal.events(TODAY, "live_cross"))["held_back"] is True
 
 
 def test_no_signals_before_todays_first_bar():

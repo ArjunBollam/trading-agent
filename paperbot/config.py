@@ -220,14 +220,6 @@ class ScanConfig(BaseModel):
     rsi_period: int = Field(14, ge=2, description="RSI length, in candles")
     rsi_oversold: float = Field(30, gt=0, lt=50, description="RSI under this is oversold")
     rsi_overbought: float = Field(70, gt=50, lt=100, description="RSI over this is overbought")
-    # An extreme RSI on a signal's candle overrides it (scanner.Found.held_back): under rsi_extreme_low, sell
-    # signals are held back from the phone and buy signals skip the bigger-picture warning; over
-    # rsi_extreme_high, the other way round.
-    rsi_extreme_low: float = Field(15, gt=0, lt=50, description=(
-        "RSI under this is extremely oversold: sell signals are held back, buy signals take priority"))
-    rsi_extreme_high: float = Field(78, gt=50, lt=100, description=(
-        "RSI over this is extremely overbought: buy signals are held back, sell signals take priority"))
-    rsi_extreme_override: bool = Field(True, description="Let an extreme RSI override other signals, as above")
     level_tolerance_pct: float = Field(0.15, gt=0, le=2, description="How close (%) a low must come to a support to test it")
     min_cross_atr: float = Field(0.2, ge=0, description="A VWAP, EMA or MACD cross must clear this many ATRs, so chop is ignored")
     vwap_touch_atr: float = Field(0.1, ge=0, description=(
