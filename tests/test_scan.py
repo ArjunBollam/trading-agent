@@ -9,10 +9,11 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from paperbot.config import ScanConfig
-from paperbot.features import Bar
+from paperbot.context import Context, Factor
+from paperbot.features import Bar, atr
 from paperbot.journal import Journal
 from paperbot.notify import Alerts
-from paperbot.patterns import analyze, levels, rsi_series, session_vwaps
+from paperbot.patterns import ChartSignal, analyze, levels, rsi_series, session_vwaps
 from paperbot.robinhood import (
     READ_ONLY_TOOLS,
     Holding,
@@ -26,7 +27,15 @@ from paperbot.robinhood import (
     parse_option_holdings,
     parse_quotes,
 )
-from paperbot.scanner import Scanner, format_result, next_scan_start, scan_forever, weekdays_back
+from paperbot.scanner import (
+    Found,
+    Scanner,
+    format_result,
+    next_scan_start,
+    rsi_extreme,
+    scan_forever,
+    weekdays_back,
+)
 
 TZ = ZoneInfo("America/New_York")
 TODAY, PREV = date(2026, 10, 26), date(2026, 10, 23)
@@ -90,6 +99,74 @@ def test_rsi_oversold_fires_once_as_an_event():
     assert len(hits) == 1
     r = rsi_series([b.c for b in bars[:hits[0]]])
     assert r[-2] >= 30 > r[-1]
+
+
+def test_extreme_rsi_fires_once_and_every_signal_carries_its_candles_rsi():
+    today, price = [], 100.0
+    for i in range(30):
+        price -= 0.25
+        today.append(Bar(at(TODAY, i), price + 0.25, price + 0.3, price - 0.05, price, 1000))
+    bars = prev_session() + today
+    hits = [n for n in range(len(prev_session()) + 2, len(bars) + 1) if "rsi_extreme_oversold" in kinds(bars[:n])]
+    assert len(hits) == 1
+    r = rsi_series([b.c for b in bars[:hits[0]]])
+    assert r[-2] >= SC.rsi_extreme_low > r[-1]
+    sigs, _ = analyze("T", bars[:hits[0]], TODAY, SC)
+    assert all(s.rsi == r[-1] for s in sigs)
+    assert "sell signals are held back" in next(s.detail for s in sigs if s.kind == "rsi_extreme_oversold")
+
+
+def test_extreme_rsi_holds_the_other_side_back_and_overrides_the_bigger_picture():
+    assert (rsi_extreme(14.9, SC), rsi_extreme(15, SC), rsi_extreme(78, SC), rsi_extreme(78.1, SC)) == (
+        "oversold", None, None, "overbought")
+    assert rsi_extreme(5, SC.model_copy(update={"rsi_extreme_override": False})) is None
+    bearish = Context((Factor(-1, 3, "double top broke down at 10:00 through 99.50, still below it"),), 3, 180)
+    buy = ChartSignal("T", "support_test", "buy", 99.0, at(TODAY, 5), "tested the low of day", rsi=12.3)
+    sell = ChartSignal("T", "breakdown", "sell", 99.0, at(TODAY, 5), "closed below the prior-day low", rsi=12.3)
+    assert Found(buy, None, (), bearish).conflict  # without the override, the bigger picture flags it
+    f = Found(buy, None, (), bearish, "oversold")
+    assert not f.held_back and f.conflict is None and "WARNING" not in f.text()
+    assert "RSI 12.3 is extremely oversold and this buy signal goes with it, so it takes priority." in f.text()
+    f = Found(sell, None, (), bearish, "oversold")
+    assert f.held_back
+    assert "Held back from your phone: RSI 12.3 is extremely oversold, which overrides this sell signal." in f.text()
+
+
+@pytest.mark.parametrize("override", [True, False])
+def test_scanner_holds_back_a_signal_an_extreme_rsi_overrides(cfg, override):
+    bars = breakout_bars()
+    r = rsi_series([b.c for b in bars])
+    assert r[-2] < r[-1] - 1 and r[-1] > 52
+    # the breakout candle counts as extremely overbought, so the breakout (a buy) is held back
+    cfg.scan = cfg.scan.model_copy(update={"rsi_extreme_high": r[-1] - 1, "rsi_extreme_override": override})
+    clock = [at(TODAY, 11) + timedelta(seconds=10)]
+    scanner, rec = make_scanner(cfg, FakeSource({"NVDA": bars}, []), lambda: clock[0])
+    b = next(f for f in scanner.scan().found if f.signal.kind == "breakout")
+    logged = next(e for e in scanner.journal.events(TODAY, "chart_signal") if e["kind"] == "breakout")
+    assert b.held_back == logged["held_back"] == override
+    if override:
+        assert all("Breakout" not in m for _, m, _ in rec.sent)
+        title, message, priority = rec.sent[0]  # the extreme RSI itself is a sell signal, and it takes priority
+        assert title == f"SELL · RSI {r[-1]:.0f} extremely overbought: NVDA" and priority == "high"
+        assert "RSI extremely overbought" in message
+    else:
+        assert any("Breakout" in m for _, m, _ in rec.sent)
+
+
+def test_live_cross_against_an_extreme_rsi_is_held_back(cfg):
+    source = FakeSource({"SPY": breakout_bars()[:-1]}, [])
+    clock = [at(TODAY, 10) + timedelta(seconds=5)]
+    scanner, rec = make_scanner(cfg, source, lambda: clock[0])
+    scanner.scan()
+    scanner.view["SPY"]["rsi"] = 85.0  # as if the last candle were extremely overbought
+    sent = len(rec.sent)
+    source.prices = {"SPY": 101.4}  # through the prior-day high (101): a buy move
+    clock[0] += timedelta(minutes=1)
+    out = scanner.tick()
+    assert "crossed above the prior-day high" in out
+    assert "Held back from your phone: RSI 85.0 is extremely overbought, which overrides this buy move." in out
+    assert len(rec.sent) == sent
+    assert next(e for e in scanner.journal.events(TODAY, "live_cross"))["held_back"] is True
 
 
 def test_no_signals_before_todays_first_bar():
@@ -217,6 +294,34 @@ def test_chop_around_vwap_is_not_a_cross():
     today = [Bar(at(TODAY, i), 100.0, 100.4, 99.6, 100.0 + (0.01 if i % 2 else -0.01), 1000) for i in range(20)]
     for n in range(3, len(today) + 1):
         assert not {"vwap_reclaim", "vwap_lost"} & kinds(prev_session() + today[:n])
+
+
+def vwap_pullback(side: str, extreme: float) -> tuple[list[Bar], float, float]:
+    """A session that opens at 100 and trades below VWAP (side "sell") or above it ("buy"), then a red
+    candle whose high reaches `extreme` (or a green one whose low does). Returns the bars, the last
+    VWAP and the ATR the scanner measures with."""
+    today = [Bar(at(TODAY, 0), 100.0, 100.2, 99.8, 100.0, 5000)]
+    if side == "sell":
+        today += [Bar(at(TODAY, i), 99.6, 99.7, 99.4, 99.5, 1000) for i in range(1, 6)]
+        today.append(Bar(at(TODAY, 6), 99.55, extreme, 99.4, 99.45, 1000))
+    else:
+        today += [Bar(at(TODAY, i), 100.4, 100.6, 100.3, 100.5, 1000) for i in range(1, 6)]
+        today.append(Bar(at(TODAY, 6), 100.45, 100.6, extreme, 100.55, 1000))
+    bars = prev_session() + today
+    return bars, session_vwaps(today)[-1], atr(bars[-30:])
+
+
+@pytest.mark.parametrize("side, kind, touch, near", [("sell", "vwap_reject", 100.0, 99.64),
+                                                     ("buy", "vwap_bounce", 100.0, 100.36)])
+def test_vwap_bounce_and_rejection_need_a_real_touch(side, kind, touch, near):
+    """A candle that reaches VWAP counts; one that stops 0.1% short doesn't, though it's inside the old
+    0.15% band, because it's more than scan.vwap_touch_atr (0.1) ATRs away. NVDA's 11:05 candle on
+    2026-10-28 stopped 26 cents (0.12%, about half an ATR) under VWAP and was called a rejection."""
+    bars, vw, a = vwap_pullback(side, touch)
+    assert kind in kinds(bars)
+    bars, vw, a = vwap_pullback(side, near)
+    assert SC.vwap_touch_atr * a < abs(vw - near) < vw * 0.0015
+    assert kind not in kinds(bars)
 
 
 def test_closing_auction_volume_is_not_a_spike():

@@ -35,6 +35,7 @@ LABELS = {
     "vwap_bounce": "VWAP bounce", "vwap_reject": "VWAP rejection",
     "rsi_oversold": "RSI oversold", "rsi_oversold_exit": "RSI back out of oversold",
     "rsi_overbought": "RSI overbought", "rsi_overbought_exit": "RSI back out of overbought",
+    "rsi_extreme_oversold": "RSI extremely oversold", "rsi_extreme_overbought": "RSI extremely overbought",
     "ema_cross_up": "EMA 9/21 bullish cross", "ema_cross_down": "EMA 9/21 bearish cross",
     "macd_cross_up": "MACD bullish cross", "macd_cross_down": "MACD bearish cross",
     "bb_reentry_up": "Back inside lower Bollinger band", "bb_reentry_down": "Back inside upper Bollinger band",
@@ -77,6 +78,7 @@ class ChartSignal:
     detail: str
     level: str | None = None  # the level a support, resistance or breakout signal refers to
     weak: bool = False  # e.g. a breakout on light volume: printed and logged, alerted only if scan.alert_weak
+    rsi: float | None = None  # RSI (scan.rsi_period) on the signal's candle
 
     @property
     def label(self) -> str:
@@ -249,11 +251,11 @@ def analyze(symbol: str, bars: list[Bar], day: date, cfg: ScanConfig, daily: lis
 
     def add(kind: str, side: str, detail: str, level: str | None = None, weak: bool = False) -> None:
         if not opening or kind in ("breakout", "breakdown"):
-            out.append(ChartSignal(symbol, kind, side, last.c, last.t, detail, level, weak))
+            out.append(ChartSignal(symbol, kind, side, last.c, last.t, detail, level, weak, rsi[-1]))
 
     # VWAP (from the second bar of the day, so there's a VWAP before the last bar)
     if len(today) >= 2 and vw[-2] is not None and vwap_now is not None:
-        tol = vwap_now * cfg.level_tolerance_pct / 100
+        tol = cfg.vwap_touch_atr * a  # how close a low or high must come to VWAP to touch it
         if prev.c < vw[-2] and last.c > vwap_now + swing:
             add("vwap_reclaim", "buy", f"closed back above VWAP {vwap_now:.2f}")
         elif prev.c > vw[-2] and last.c < vwap_now - swing:
@@ -275,6 +277,14 @@ def analyze(symbol: str, bars: list[Bar], day: date, cfg: ScanConfig, daily: lis
             add("rsi_overbought", "sell", f"RSI({cfg.rsi_period}) rose to {r1:.1f}, over {hi:g}: overbought, watch for a pullback")
         elif r0 > hi >= r1:
             add("rsi_overbought_exit", "sell", f"RSI({cfg.rsi_period}) fell back to {r1:.1f}, below {hi:g}")
+        lo, hi = cfg.rsi_extreme_low, cfg.rsi_extreme_high
+        held = ", so {} signals are held back while it lasts" if cfg.rsi_extreme_override else ""
+        if r0 >= lo > r1:
+            add("rsi_extreme_oversold", "buy",
+                f"RSI({cfg.rsi_period}) fell to {r1:.1f}, under {lo:g}: extremely oversold" + held.format("sell"))
+        if r0 <= hi < r1:
+            add("rsi_extreme_overbought", "sell",
+                f"RSI({cfg.rsi_period}) rose to {r1:.1f}, over {hi:g}: extremely overbought" + held.format("buy"))
 
     # Moving averages and MACD. A cross counts only after a real swing the other way, not a wobble.
     ema_gap = [x - y if x is not None and y is not None else None for x, y in zip(e9, e21, strict=True)]

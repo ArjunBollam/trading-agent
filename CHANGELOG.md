@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-10-28 (11:35 AM): an extreme RSI overrides other signals
+
+- When the 5-minute RSI on a signal's candle is under `scan.rsi_extreme_low` (15), sell signals are held back
+  from the phone (still printed, journaled with `held_back`, and tagged "held back · RSI 12 extremely
+  oversold" on the web page), and buy signals go out at high priority, titled "BUY · RSI 12 extremely
+  oversold", without the bigger-picture warning. Over `rsi_extreme_high` (78), the other way round. Live
+  level crosses between candles follow the last completed candle's RSI. `rsi_extreme_override: false` turns it off.
+- Two new signals: RSI extremely oversold (crossing under 15, a buy) and extremely overbought (crossing over
+  78, a sell). Every signal now carries its candle's RSI (`ChartSignal.rsi`, `rsi` in the journal).
+- Replayed on today's candles for the 7 live symbols: of 1,071 signals, 12 would have been held back (among
+  them SPCX's 09:35-09:45 sells at RSI 8.6-12.8 and TSLA's 10:05 breakdown at 14.3) and 13 would have taken
+  priority. 5 new tests; 267 pass.
+
+## 2026-10-28 (11:30 AM): VWAP bounces and rejections need a real touch
+
+- A VWAP bounce or rejection now needs the candle's low or high within `scan.vwap_touch_atr` (0.1) ATRs of
+  VWAP, instead of within `level_tolerance_pct` (0.15%) of it. On NVDA (about $218, an ATR near 50 cents) the
+  old band was 33 cents, so candles that stopped 24-26 cents under VWAP were called rejections (10:05 and
+  11:05 today). Replayed on today's NVDA candles, 10:05, 10:35 and 11:05 no longer fire; the 09:45 rejection
+  (3 cents short) and the 09:35 bounce still do. Support and resistance tests keep `level_tolerance_pct`.
+- Editable on the web page's Settings tab. 2 new tests; 262 pass.
+
 ## 2026-10-27 (6:10 PM): pre-market and after-hours scanning
 
 - `scan.sessions` (default `[pre, regular, post]`): the live scanner runs 4:00–20:00 ET instead of stopping at

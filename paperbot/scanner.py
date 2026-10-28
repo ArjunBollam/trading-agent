@@ -33,6 +33,25 @@ def _against(direction: int, side: str) -> bool:
     return direction * (1 if side == "buy" else -1) < 0
 
 
+def rsi_extreme(rsi: float | None, sc: ScanConfig) -> str | None:
+    """"oversold" or "overbought" when `rsi` is past scan.rsi_extreme_low/high and the override is on."""
+    if rsi is None or not sc.rsi_extreme_override:
+        return None
+    return "oversold" if rsi < sc.rsi_extreme_low else "overbought" if rsi > sc.rsi_extreme_high else None
+
+
+def _overridden(extreme: str | None, side: str) -> bool:
+    """Whether an extreme RSI points the other way from a buy or sell signal: oversold holds sells back."""
+    return extreme is not None and side == ("sell" if extreme == "oversold" else "buy")
+
+
+def rsi_note(rsi: float, extreme: str, side: str, noun: str = "signal") -> str:
+    """" Held back from your phone: RSI 12.3 is extremely oversold, ..." or why the signal takes priority."""
+    if _overridden(extreme, side):
+        return f" Held back from your phone: RSI {rsi:.1f} is extremely {extreme}, which overrides this {side} {noun}."
+    return f" RSI {rsi:.1f} is extremely {extreme} and this {side} {noun} goes with it, so it takes priority."
+
+
 def money(x: float) -> str:
     return f"{'-' if x < 0 else '+'}${abs(x):,.0f}"
 
@@ -73,11 +92,20 @@ class Found:
     holding: Holding | None
     options: tuple[OptionHolding, ...] = ()  # option positions on this symbol
     context: Context | None = None  # the bigger picture on the bar the signal came from
+    extreme: str | None = None  # "oversold" or "overbought": the signal's candle's RSI is past scan.rsi_extreme_*
+
+    @property
+    def held_back(self) -> bool:
+        """An extreme RSI points the other way, so this signal is logged and shown on the page, not alerted."""
+        return _overridden(self.extreme, self.signal.side)
 
     @property
     def conflict(self) -> str | None:
-        """Why this signal goes against the bigger picture, or None."""
-        return self.context.conflict(self.signal.side) if self.context is not None else None
+        """Why this signal goes against the bigger picture, or None. An extreme RSI that the signal goes
+        with overrides the bigger picture."""
+        if self.context is None or (self.extreme is not None and not self.held_back):
+            return None
+        return self.context.conflict(self.signal.side)
 
     @property
     def against(self) -> bool:
@@ -89,7 +117,8 @@ class Found:
         s = self.signal
         line = f"{s.bar_time:%H:%M} {s.label}{' (weak)' if s.weak else ''} at {s.price:.2f}: {s.detail}."
         warn = f" WARNING: {c}" if (c := self.conflict) else ""
-        return line + position_notes(s.side, s.price, self.holding, self.options) + warn
+        rsi = rsi_note(s.rsi, self.extreme, s.side) if self.extreme and s.rsi is not None else ""
+        return line + position_notes(s.side, s.price, self.holding, self.options) + rsi + warn
 
 
 @dataclass
@@ -233,7 +262,7 @@ class Scanner:
                 if last is not None and sig.bar_time - last < timedelta(minutes=max(sc.cooldown_minutes, 1)):
                     continue
                 self.last_fired[sig.key] = sig.bar_time
-                f = Found(sig, held.get(sym), held_options.get(sym, ()), sig_ctx)
+                f = Found(sig, held.get(sym), held_options.get(sym, ()), sig_ctx, rsi_extreme(sig.rsi, sc))
                 new.append(f)
                 if not send_alerts:
                     continue
@@ -241,9 +270,10 @@ class Scanner:
                                  level=sig.level, price=sig.price, bar_time=sig.bar_time.isoformat(),
                                  detail=sig.detail, held=f.holding is not None or bool(f.options),
                                  against_position=f.against, weak=sig.weak, context=sig_ctx.bias,
-                                 context_score=sig_ctx.score, conflict=f.conflict)
+                                 context_score=sig_ctx.score, conflict=f.conflict, rsi=sig.rsi,
+                                 rsi_extreme=f.extreme, held_back=f.held_back)
             found += new
-            loud = [f for f in new if (sc.alert_weak or not f.signal.weak)
+            loud = [f for f in new if (sc.alert_weak or not f.signal.weak) and not f.held_back
                     and not (sc.context_mode == "suppress" and f.conflict)]
             if send_alerts and loud:
                 groups = [loud] if sc.one_alert_per_symbol else [[f] for f in loud]
@@ -309,6 +339,8 @@ class Scanner:
             if not crossed:
                 continue
             texts, against = [], False
+            rsi = self.view.get(sym, {}).get("rsi")  # the last completed candle's
+            extreme = rsi_extreme(rsi, sc)
             for lv, side in crossed:
                 texts.append(f"{now:%H:%M:%S} Live: {sym} {px:.2f} crossed {'above' if side == 'buy' else 'below'} the "
                              f"{lv.name} {lv.price:.2f} inside the {bar:%H:%M} candle; not confirmed until it closes at "
@@ -318,14 +350,17 @@ class Scanner:
                 against |= hit
                 if send_alerts:
                     self.journal.log("live_cross", symbol=sym, level=lv.name, level_price=lv.price, price=px,
-                                     side=side, against_position=hit)
+                                     side=side, against_position=hit, rsi=rsi, rsi_extreme=extreme,
+                                     held_back=_overridden(extreme, side))
             side = crossed[-1][1]  # both ways in one tick can't happen: the price is on one side of each level
             text = "\n".join(texts) + position_notes(side, px, held, opts, "move", live.marks)
+            if extreme:
+                text += rsi_note(rsi, extreme, side, "move")
             lines.append(text)
-            if send_alerts:
+            if send_alerts and not _overridden(extreme, side):
                 names = " & ".join(lv.name for lv, _ in crossed)
                 self.alerts.send(f"LIVE {'above' if side == 'buy' else 'below'} {names}: {sym}", text,
-                                 "high" if against else "default",
+                                 "high" if against or extreme else "default",
                                  ["zap", "chart_with_upwards_trend" if side == "buy" else "chart_with_downwards_trend"])
         self.publish(now)
         return "\n".join(lines)
@@ -381,11 +416,13 @@ class Scanner:
         sides = {f.signal.side for f in group}
         side = sides.pop().upper() if len(sides) == 1 else "MIXED"
         title = f"{side} signal{'s' if len(group) > 1 else ''}: {sym}"
-        if any(f.conflict for f in group):
+        if x := next((f for f in group if f.extreme and f.signal.rsi is not None), None):
+            title = f"{side} · RSI {x.signal.rsi:.0f} extremely {x.extreme}: {sym}"
+        elif any(f.conflict for f in group):
             title = f"{side} against the bigger picture: {sym}"
-        against = any(f.against or f.conflict for f in group)
+        urgent = any(f.against or f.conflict or f.extreme for f in group)
         tag = {"BUY": "chart_with_upwards_trend", "SELL": "chart_with_downwards_trend"}.get(side, "left_right_arrow")
-        self.alerts.send(title, alert_text(group), "high" if against else "default", [tag])
+        self.alerts.send(title, alert_text(group), "high" if urgent else "default", [tag])
 
 
 def alert_text(group: list[Found], limit: int = 3800) -> str:

@@ -461,8 +461,17 @@ function contextTag(s) {
   return "";
 }
 
+function rsiTag(s) {
+  // an extreme RSI on the signal's candle holds the other side back (scan.rsi_extreme_low / high)
+  if (!s.rsi_extreme || s.rsi == null) return "";
+  const what = `RSI ${num(s.rsi, 0)} extremely ${s.rsi_extreme}`;
+  return s.held_back
+    ? `<span class="tag against" title="Not sent to your phone: ${esc(what)} overrides it">held back · ${esc(what)}</span>`
+    : `<span class="tag with" title="Takes priority over the bigger picture">${esc(what)}</span>`;
+}
+
 function signalItem(s, isNew) {
-  const tags = [s.live ? `<span class="tag live">live</span>` : "", s.weak ? `<span class="tag">log only</span>` : "", effectTag(s), contextTag(s)].join("");
+  const tags = [s.live ? `<span class="tag live">live</span>` : "", s.weak ? `<span class="tag">log only</span>` : "", effectTag(s), rsiTag(s), contextTag(s)].join("");
   return `<li class="${s.weak ? "weak" : ""}${isNew ? " new" : ""}">
     <div class="line1"><span class="t">${hm(s.time)}</span>${sideBadge(s.side)}<span class="sym">${esc(s.symbol)}</span>
       <span class="lab">${esc(s.label)}</span><span class="px">@ ${num(s.price)}</span>${tags}</div>

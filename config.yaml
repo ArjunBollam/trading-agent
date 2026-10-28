@@ -114,7 +114,14 @@ scan:                             # `paperbot scan`: read-only chart signals on 
   cooldown_minutes: 30            # the same kind of signal on the same symbol (and level), at most this often
   rsi_oversold: 30
   rsi_overbought: 70
+  # An extreme RSI on the signal's candle overrides it: under 15, sell signals (and live moves down) are
+  # held back from your phone, logged and shown on the page; buy signals go out at high priority without
+  # the bigger-picture warning. Over 78, the other way round. rsi_extreme_override: false turns it off.
+  rsi_extreme_low: 15
+  rsi_extreme_high: 78
+  rsi_extreme_override: true
   min_cross_atr: 0.2              # a VWAP/EMA/MACD cross must clear 0.2 ATR, so chop around a line is ignored
+  vwap_touch_atr: 0.1             # a VWAP bounce/rejection needs the low/high within 0.1 ATR of VWAP
   breakout_volume_ratio: 1.5      # breakouts below 1.5x volume are "weak": printed, not alerted
   alert_weak: false
   one_alert_per_symbol: true      # one phone alert per symbol per scan, listing every new signal
