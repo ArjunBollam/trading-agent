@@ -1,30 +1,48 @@
 # paperbot
 
-A paper-trading agent for short-dated options on SPY, QQQ, AAPL, MSFT and NVDA, built on
-Autobelay's design: **the AI proposes, code decides.** The AI (Claude, Grok or Groq, your
-choice) reads the market and returns JSON proposals. Plain Python checks every proposal against hard limits, places the orders, and runs
-every exit. The orchestration is a LangGraph state graph. Alerts go to your phone through ntfy
-or Telegram.
+**An AI options-trading agent and a real-time chart-signal scanner, with a live web dashboard.**
+Paper trading only: no real money is ever at risk.
 
-It only trades Alpaca's paper (simulated) account. There is no live-trading code path: the broker
-adapter always builds the paper client, checks that it points at `paper-api.alpaca.markets`, and
-refuses live keys (they start with `AK`).
+![Dashboard: live 5-minute charts with buy and sell signals marked on the candles](docs/screenshots/dashboard.png)
+
+*The dashboard during a live session (Nov 16, 2026): every buy (green) and sell (red) signal is
+marked on the candle that triggered it, next to VWAP, high and low of day, prior-day and
+opening-range levels. The feed on the right explains each signal in plain words.*
+
+## Highlights
+
+- **The AI proposes, code decides.** Each cycle is a LangGraph state graph: preflight, protect,
+  snapshot, research with tool calls, decide, execute, report. The LLM returns JSON trade
+  proposals; plain Python checks each one against hard risk limits, places the orders and runs
+  every exit. The prompt never enforces a limit.
+- **116 chart patterns, scanned live.** 24 classic (head and shoulders, triangles, flags, wedges,
+  double and triple tops and bottoms), 78 candlestick and 14 Fibonacci patterns, plus VWAP, EMA,
+  MACD, RSI, Bollinger band and pivot events. Runs on every 5-minute candle, with live price checks
+  every 10 seconds.
+- **Order flow from the trade tape.** Footprint bars, delta, cumulative delta and volume profile,
+  used to spot absorption, stacked imbalances, exhaustion, divergence and failed breakouts
+  ([docs/ORDERFLOW.md](docs/ORDERFLOW.md)).
+- **Context-aware phone alerts.** Each signal is checked against the slower trend and key price
+  levels, then pushed to your phone, flagged when it goes against a position you hold.
+- **Any LLM, with automatic fallback.** Claude, Grok, Groq, Gemini or OpenRouter. When one model
+  hits its rate limit or daily token budget, the next one answers.
+- **Built to be trusted.** Kill switches, a daily loss limit, runaway-order protection, a journal
+  of every decision, order and fill, and 288 tests that run against a fake broker and scripted AI
+  replies.
+
+**Tech:** Python 3.13 · LangGraph · Anthropic and OpenAI-compatible APIs · Alpaca API ·
+Starlette · TradingView Lightweight Charts · pytest · macOS launchd
+
+It only trades Alpaca's paper (simulated) account, for short-dated options on SPY, QQQ, AAPL, MSFT
+and NVDA. There is no live-trading code path: the broker adapter always builds the paper client,
+checks that it points at `paper-api.alpaca.markets`, and refuses live keys (they start with `AK`).
+The design follows Autobelay's (see [below](#autobelays-gaps-and-what-this-build-does-instead)).
+Nothing here is financial advice, and no signal has a proven edge.
 
 ## Screenshots
 
-Captured from the local dashboard (`paperbot web`) during a live session on Nov 16, 2026.
-
-**Dashboard.** Live 5-minute charts with every buy (green) and sell (red) signal marked on the
-candle that triggered it, plus VWAP, high and low of day, prior-day and opening-range levels. Next to
-the charts is today's signal feed, with each signal explained in plain words and checked against
-the bigger picture.
-
-![Dashboard: live charts with buy and sell signals](docs/screenshots/dashboard.png)
-
-**Signals.** Every signal of the day: 116 chart patterns (24 classic, 78 candlestick,
-14 Fibonacci), 14 order-flow setups from the trade tape, and indicator events (VWAP, EMA, MACD, RSI,
-Bollinger bands, pivots). Each row says what happened and whether it goes with or against your
-position.
+**Signals.** Every signal of the day: chart patterns, 14 order-flow setups and indicator events.
+Each row says what happened and whether it goes with or against your position.
 
 ![Signals: every signal with what happened](docs/screenshots/signals.png)
 
