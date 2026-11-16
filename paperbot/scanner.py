@@ -22,6 +22,7 @@ from .context import Context, assess
 from .features import SESSIONS, Bar, atr, regular, session_of
 from .journal import Journal
 from .notify import Alerts
+from .orderflow import Check, check
 from .patterns import ChartSignal, Level, Summary, analyze, levels, session_vwaps
 from .robinhood import Holding, MarketSource, OptionHolding, mask
 
@@ -73,6 +74,7 @@ class Found:
     holding: Holding | None
     options: tuple[OptionHolding, ...] = ()  # option positions on this symbol
     context: Context | None = None  # the bigger picture on the bar the signal came from
+    flow: Check | None = None  # does order flow agree? (chart signals only, with order flow on)
 
     @property
     def conflict(self) -> str | None:
@@ -89,7 +91,8 @@ class Found:
         s = self.signal
         line = f"{s.bar_time:%H:%M} {s.label}{' (weak)' if s.weak else ''} at {s.price:.2f}: {s.detail}."
         warn = f" WARNING: {c}" if (c := self.conflict) else ""
-        return line + position_notes(s.side, s.price, self.holding, self.options) + warn
+        flow = f" {self.flow.text()}" if self.flow else ""
+        return line + flow + position_notes(s.side, s.price, self.holding, self.options) + warn
 
 
 @dataclass
@@ -169,7 +172,8 @@ class Scanner:
         """Order-flow signals (orderflow.py) from the trade tape, on the last completed bar, or on every
         bar with catch_up. A tape outage costs only these signals."""
         self.flow_bars.pop(sym, None)
-        if self.flow is None or not self.cfg.orderflow.in_scan:
+        of = self.cfg.orderflow
+        if self.flow is None or not (of.in_scan or of.check_signals or of.in_context):
             return []
         prev = [b for b in bars if b.t.date() < day and regular(b)]
         last = max((b.t.date() for b in prev), default=None)
@@ -183,6 +187,8 @@ class Scanner:
         if not fbars:
             return []
         self.flow_bars[sym] = fbars
+        if not of.in_scan:
+            return []  # the bars are still used, to check chart signals and in the bigger picture
         keep = sigs if catch_up else [s for s in sigs if s.bar_time == fbars[-1].t]
         return [ChartSignal(sym, s.kind, s.side, s.price, s.bar_time, s.detail, s.level, s.weak) for s in keep]
 
@@ -220,14 +226,18 @@ class Scanner:
             day_bars = [b.__class__(b.t.astimezone(tz), b.o, b.h, b.l, b.c, b.v) for b in daily.get(sym, [])]
             ends = [i + 1 for i, b in enumerate(bars) if b.t.date() == day] if catch_up else []
             signals: list[tuple[ChartSignal, Context]] = []
+            flow_signals = self._flow_signals(sym, bars, day, now, catch_up)
+            fbars = self.flow_bars.get(sym, [])
+            in_ctx = fbars if self.cfg.orderflow.in_context else None
+            feed = self.cfg.orderflow.feed
             for end in ends[:-1]:  # oldest first, so the cooldown sees signals in order
                 if older := analyze(sym, bars[:end], day, sc, day_bars)[0]:
-                    ctx_then = assess(bars[:end], day, sc)
+                    ctx_then = assess(bars[:end], day, sc, in_ctx, feed)
                     signals += [(sig, ctx_then) for sig in older]
             last_signals, summary = analyze(sym, bars, day, sc, day_bars)
-            ctx = contexts[sym] = assess(bars, day, sc)
+            ctx = contexts[sym] = assess(bars, day, sc, in_ctx, feed)
             signals += [(sig, ctx) for sig in last_signals]
-            signals += [(sig, ctx) for sig in self._flow_signals(sym, bars, day, now, catch_up)]
+            signals += [(sig, ctx) for sig in flow_signals]
             summaries.append(summary)
             today_bars = [b for b in bars if b.t.date() == day]
             # before today's first candle (overnight, or a restart then) the page shows the last session's
@@ -242,7 +252,7 @@ class Scanner:
                                        for b in shown], "levels": [],  # the last item: pre-market or after hours
                               "context": {"bias": ctx.bias, "score": ctx.score,
                                           "factors": [{"side": f.side, "weight": f.weight, "text": f.text} for f in ctx.factors]}}
-            if shown_day == day and (fbars := self.flow_bars.get(sym)):
+            if shown_day == day and fbars:
                 # per candle: start time, delta (bought at the offer minus sold at the bid), session CVD
                 self.view[sym]["flow"] = {"feed": self.cfg.orderflow.feed,
                                           "bars": [[int(b.t.timestamp()), round(b.delta), round(b.cvd)] for b in fbars]}
@@ -262,7 +272,9 @@ class Scanner:
                 if last is not None and sig.bar_time - last < timedelta(minutes=max(sc.cooldown_minutes, 1)):
                     continue
                 self.last_fired[sig.key] = sig.bar_time
-                f = Found(sig, held.get(sym), held_options.get(sym, ()), sig_ctx)
+                chk = (check(fbars, sig.bar_time, sig.side, self.cfg.orderflow.check_bars, feed)
+                       if self.cfg.orderflow.check_signals and not sig.kind.startswith("of_") else None)
+                f = Found(sig, held.get(sym), held_options.get(sym, ()), sig_ctx, chk)
                 new.append(f)
                 if not send_alerts:
                     continue
@@ -270,7 +282,8 @@ class Scanner:
                                  level=sig.level, price=sig.price, bar_time=sig.bar_time.isoformat(),
                                  detail=sig.detail, held=f.holding is not None or bool(f.options),
                                  against_position=f.against, weak=sig.weak, context=sig_ctx.bias,
-                                 context_score=sig_ctx.score, conflict=f.conflict)
+                                 context_score=sig_ctx.score, conflict=f.conflict,
+                                 flow=chk.verdict if chk else None, flow_detail=chk.text() if chk else None)
             found += new
             loud = [f for f in new if (sc.alert_weak or not f.signal.weak)
                     and not (sc.context_mode == "suppress" and f.conflict)]
@@ -412,6 +425,9 @@ class Scanner:
         title = f"{side} signal{'s' if len(group) > 1 else ''}: {sym}"
         if any(f.conflict for f in group):
             title = f"{side} against the bigger picture: {sym}"
+        verdicts = {f.flow.verdict for f in group if f.flow}
+        if len(verdicts) == 1 and (v := verdicts.pop()) != "mixed":
+            title += f" (order flow {v})"
         against = any(f.against or f.conflict for f in group)
         tag = {"BUY": "chart_with_upwards_trend", "SELL": "chart_with_downwards_trend"}.get(side, "left_right_arrow")
         self.alerts.send(title, alert_text(group), "high" if against else "default", [tag])

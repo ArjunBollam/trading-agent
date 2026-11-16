@@ -298,6 +298,9 @@ class OrderFlowConfig(BaseModel):
     alert_setups: bool = True  # phone alert, and an AI cycle if schedule.trigger_cycle_on_signal, on each setup
     in_prompt: bool = True  # give the AI a summary of today's order flow each cycle
     in_scan: bool = True  # show order-flow signals on the scanner's charts and alerts
+    check_signals: bool = True  # tag each scanner chart signal: does order flow agree with it?
+    check_bars: int = Field(3, ge=1, le=12, description="Candles of CVD change a chart signal's check looks at")
+    in_context: bool = True  # count a clear CVD trend in the scanner's bigger picture
 
 
 class Config(BaseModel):

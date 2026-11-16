@@ -286,3 +286,75 @@ def test_scanner_publishes_delta_and_cvd_for_the_page(cfg):
     scanner.flow = None  # order flow off: no panel
     scanner.scan(send_alerts=False)
     assert "flow" not in scanner.view["SPY"]
+
+
+# ---- order flow as a second opinion on chart signals ----------------------------------------------
+
+
+def flat_day(n: int = 10, last: tuple[float, float] | None = None) -> list[of.FlowBar]:
+    """Balanced candles at 100.5, then optionally one with (bought, sold) volume."""
+    bars = [mk(i, 100.5, 100.8, 100.2, 100.5, 10_000, 10_000) for i in range(n)]
+    if last is not None:
+        bars.append(mk(n, 100.6, 101.6, 100.5, 101.5, *last))
+    return with_cvd(bars)
+
+
+def test_check_reads_the_signal_candles_delta_and_the_cvd():
+    up = flat_day(last=(30_000, 10_000))  # buyers took the breakout candle
+    t = up[-1].t
+    agrees = of.check(up, t, "buy")
+    assert agrees.verdict == "agrees" and agrees.delta == 20_000 and agrees.cvd_change == 20_000 and agrees.bars == 3
+    assert agrees.text() == "Order flow agrees (IEX trades): delta +20.0K on this candle, CVD +20.0K over the last 3 candles."
+    assert of.check(up, t, "sell").verdict == "disagrees"
+    assert of.check(flat_day(), flat_day()[-1].t, "buy").verdict == "mixed"  # nobody pushed: no read either way
+
+    # sellers hit this candle, but the last 3 candles net bought: one vote each way
+    mixed = with_cvd([*flat_day(8), mk(8, 100.5, 100.8, 100.2, 100.6, 40_000, 10_000),
+                      mk(9, 100.6, 100.9, 100.3, 100.5, 10_000, 20_000)])
+    m = of.check(mixed, mixed[-1].t, "buy")
+    assert m.verdict == "mixed" and m.delta < 0 < m.cvd_change and m.text().startswith("Order flow is mixed")
+    assert of.check(up, t - timedelta(hours=1), "buy") is None  # no flow bar for that candle (before the open)
+
+
+def test_cvd_trend_needs_more_than_noise():
+    up = flat_day(last=(30_000, 10_000))
+    side, change, since = of.cvd_trend(up, OPEN, up[-1].t)
+    assert side == 1 and change == 20_000 and since == OPEN
+    choppy = with_cvd([mk(i, 100.5, 100.8, 100.2, 100.5, 12_000 if i % 2 else 8_000, 8_000 if i % 2 else 12_000) for i in range(12)])
+    assert of.cvd_trend(choppy, OPEN, choppy[-1].t) is None  # back and forth: no trend
+    assert of.cvd_trend(up, up[-1].t, up[-1].t) is None  # too few candles to call
+
+
+def test_chart_signals_say_whether_order_flow_agrees(cfg):
+    from test_scan import FakeSource, at, breakout_bars, make_scanner
+
+    from paperbot.patterns import ChartSignal
+    from paperbot.scanner import Found, alert_text
+
+    now = at(DAY, 11) + timedelta(seconds=10)  # the breakout candle has just closed
+    scanner, rec = make_scanner(cfg, FakeSource({"NVDA": breakout_bars()}, []), lambda: now)
+    scanner.flow = FakeFlow(flat_day(last=(30_000, 10_000)))
+    r = scanner.scan()
+    f = next(x for x in r.found if x.signal.kind == "breakout")
+    assert f.flow.verdict == "agrees" and "Order flow agrees (IEX trades): delta +20.0K" in f.text()
+    [e] = [e for e in scanner.journal.events(DAY, "chart_signal") if e["kind"] == "breakout"]
+    assert e["flow"] == "agrees" and e["flow_detail"] == f.flow.text()
+    title, message, _ = next(x for x in rec.sent if "NVDA" in x[0])
+    assert "(order flow agrees)" in title and "Order flow agrees" in message
+    assert all(x.flow is None for x in r.found if x.signal.kind.startswith("of_"))  # order flow doesn't check itself
+    assert any("CVD rising since 09:30" in fc.text and fc.side == 1 for fc in r.contexts["NVDA"].factors)
+
+    scanner, rec = make_scanner(cfg, FakeSource({"NVDA": breakout_bars()}, []), lambda: now)
+    scanner.journal = type(scanner.journal)(cfg.log_dir / "other", lambda: now)  # a fresh day's journal
+    scanner.flow = FakeFlow(flat_day(last=(10_000, 30_000)))  # the same breakout, but sellers hit it
+    f = next(x for x in scanner.scan().found if x.signal.kind == "breakout")
+    assert f.flow.verdict == "disagrees" and "Order flow disagrees" in alert_text([f])
+
+    cfg.orderflow.check_signals, cfg.orderflow.in_context = False, False  # both off: no tag, no CVD factor
+    scanner, _ = make_scanner(cfg, FakeSource({"NVDA": breakout_bars()}, []), lambda: now)
+    scanner.journal = type(scanner.journal)(cfg.log_dir / "third", lambda: now)
+    scanner.flow = FakeFlow(flat_day(last=(30_000, 10_000)))
+    r = scanner.scan(send_alerts=False)
+    assert all(x.flow is None for x in r.found) and not any("CVD" in fc.text for fc in r.contexts["NVDA"].factors)
+    plain = Found(ChartSignal("NVDA", "breakout", "buy", 101.5, at(DAY, 10), "x"), None)
+    assert "Order flow" not in plain.text()

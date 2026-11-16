@@ -104,9 +104,11 @@ function signalTipHtml(s) {
     s.against === true ? "against your position" : s.against === false && s.held ? "with your position" : "",
     s.conflict ? "against the bigger picture" : "",
   ].filter(Boolean);
+  const flow = s.flow ? `<div class="tip-detail flow-${esc(s.flow)}">${esc(s.flow_detail || "Order flow " + s.flow)}</div>` : "";
   return `<div class="tip-sig ${s.side}">
     <div class="tip-title">${sideBadge(s.side)}<b>${esc(s.label)}</b><span class="muted">${hm(s.time)} · ${num(s.price)}</span></div>
     ${s.detail ? `<div class="tip-detail">${esc(s.detail)}</div>` : ""}
+    ${flow}
     ${flags.length ? `<div class="tip-flags">${flags.map((f) => `<span class="tag">${esc(f)}</span>`).join("")}</div>` : ""}
     ${explainHtml(s.kind)}</div>`;
 }
@@ -637,8 +639,15 @@ function contextTag(s) {
   return "";
 }
 
+// does order flow (delta and CVD) back this chart signal? from the scanner's check
+function flowTag(s) {
+  if (!s.flow) return "";
+  const cls = { agrees: "with", disagrees: "against" }[s.flow] || "";
+  return `<span class="tag ${cls}" title="${esc(s.flow_detail || "")}">order flow ${s.flow === "mixed" ? "mixed" : s.flow}</span>`;
+}
+
 function signalItem(s, isNew) {
-  const tags = [s.live ? `<span class="tag live">live</span>` : "", s.weak ? `<span class="tag">log only</span>` : "", effectTag(s), contextTag(s)].join("");
+  const tags = [s.live ? `<span class="tag live">live</span>` : "", s.weak ? `<span class="tag">log only</span>` : "", effectTag(s), flowTag(s), contextTag(s)].join("");
   return `<li class="${s.weak ? "weak" : ""}${isNew ? " new" : ""}">
     <div class="line1"><span class="t">${hm(s.time)}</span>${sideBadge(s.side)}<span class="sym">${esc(s.symbol)}</span>
       <span class="lab" data-explain="${esc(s.kind)}">${esc(s.label)}</span><span class="px">@ ${num(s.price)}</span>${tags}</div>
@@ -743,7 +752,7 @@ function renderHistory() {
   $("#sig-table").innerHTML = `<tr><th>Time</th><th>Symbol</th><th>Side</th><th>Signal</th><th>Price</th><th>What happened</th><th>Your position</th></tr>` +
     rows.map((s) => `<tr class="${s.weak ? "muted" : ""}"><td class="mono">${hm(s.time)}</td><td><b>${esc(s.symbol)}</b></td><td>${sideBadge(s.side)}</td>
       <td><span data-explain="${esc(s.kind)}">${esc(s.label)}</span>${s.live ? ` <span class="tag live">live</span>` : ""}${s.weak ? ` <span class="tag">log only</span>` : ""}</td>
-      <td class="mono">${num(s.price)}</td><td class="small">${esc(s.detail || "")}</td><td>${effectTag(s)} ${contextTag(s)}</td></tr>`).join("");
+      <td class="mono">${num(s.price)}</td><td class="small">${esc(s.detail || "")}</td><td>${effectTag(s)} ${flowTag(s)} ${contextTag(s)}</td></tr>`).join("");
 }
 $("#sig-date").addEventListener("change", loadHistory);
 ["#sig-symbol", "#sig-side", "#sig-against", "#sig-weak"].forEach((s) => $(s).addEventListener("change", renderHistory));

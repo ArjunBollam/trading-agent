@@ -13,7 +13,8 @@ bullish or bearish.
             neckline not broken yet, price within 3 ATRs of it), and the swing structure: lower highs and lower lows, or
             higher highs and higher lows, over the window
   weight 1  a double top or bottom still forming; the slower candle's EMA 9/21 trend and MACD;
-            its RSI past 70 or 30 (stretched, so the risk is the other way); price against VWAP
+            its RSI past 70 or 30 (stretched, so the risk is the other way); price against VWAP;
+            the CVD (order flow) clearly rising or falling over the window, when order flow is on
 
 A signal conflicts with the bigger picture when any weight-2-or-more factor points the other way, or
 the score does. With scan.context_mode "warn" the alert says so and goes out at high priority; with
@@ -28,6 +29,7 @@ from datetime import date, datetime, timedelta
 from . import formations
 from .config import ScanConfig
 from .features import Bar, atr
+from .orderflow import FlowBar, cvd_trend, short
 from .patterns import LABELS, ema_series, macd_series, rsi_series, session_vwaps
 
 MAJOR = 2  # a factor this heavy can veto a signal on its own
@@ -143,9 +145,10 @@ def _structure(bars: list[Bar], first: int, threshold: float) -> Factor | None:
     return None
 
 
-def assess(bars: list[Bar], day: date, cfg: ScanConfig) -> Context:
+def assess(bars: list[Bar], day: date, cfg: ScanConfig, flow: list[FlowBar] | None = None,
+           feed: str = "iex") -> Context:
     """The bigger picture on the last of `bars` (completed bars at scan.bar_minutes, oldest first, a
-    couple of earlier sessions included for warm-up)."""
+    couple of earlier sessions included for warm-up). `flow`: today's order-flow bars, if any."""
     ctx = Context((), cfg.context_threshold, cfg.context_minutes)
     if len(bars) < 30 or cfg.context_mode == "off":
         return ctx
@@ -175,6 +178,10 @@ def assess(bars: list[Bar], day: date, cfg: ScanConfig) -> Context:
         gap = bars[-1].c - vw[-1]
         if abs(gap) >= cfg.min_cross_atr * a:
             out.append(Factor(1 if gap > 0 else -1, 1, f"price {'above' if gap > 0 else 'below'} VWAP {vw[-1]:.2f}"))
+    if flow and (tr := cvd_trend(flow, cutoff, bars[-1].t)) is not None:
+        up, change, since = tr[0] > 0, tr[1], tr[2]
+        out.append(Factor(tr[0], 1, f"CVD {'rising' if up else 'falling'} since {_since(since, day)} ({short(change)} on "
+                                    f"{feed.upper()} trades): {'buyers' if up else 'sellers'} more aggressive"))
 
     if cfg.context_bar_minutes > cfg.bar_minutes and cfg.context_bar_minutes % cfg.bar_minutes == 0:
         slow = resample(bars, cfg.context_bar_minutes, cfg.bar_minutes)

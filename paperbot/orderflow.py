@@ -525,6 +525,74 @@ def summary(bars: list[FlowBar], signals: list[FlowSignal], feed: str) -> dict:
     return out
 
 
+FLAT_SHARE = 0.25  # a delta or CVD move under this share of the session's average candle delta counts as flat
+
+
+def short(x: float) -> str:
+    """+4.7K, -1.2M, +350: a signed volume, short."""
+    a = abs(x)
+    s = f"{a / 1e6:.1f}M" if a >= 1e6 else f"{a / 1e3:.1f}K" if a >= 1e3 else f"{a:.0f}"
+    return ("+" if x > 0 else "-" if x < 0 else "") + s
+
+
+def _vote(x: float, flat: float) -> int:
+    return 0 if abs(x) <= flat else 1 if x > 0 else -1
+
+
+@dataclass(frozen=True)
+class Check:
+    """Whether the tape backs a chart signal: who was aggressive on the signal's candle (delta),
+    and which way CVD moved over the last few candles."""
+
+    verdict: str  # "agrees", "disagrees" or "mixed" (one each way, or both flat)
+    delta: float  # the signal candle's delta
+    cvd_change: float  # CVD change over `bars` candles, the signal's included
+    bars: int
+    feed: str
+
+    def text(self) -> str:
+        """"Order flow agrees (IEX trades): delta +4.7K on this candle, CVD +12.0K over the last 3 candles.\""""
+        head = "is mixed" if self.verdict == "mixed" else self.verdict
+        cvd = (f", CVD {short(self.cvd_change)} over the last {self.bars} candles" if self.bars > 1
+               else " (the session's first)")
+        return f"Order flow {head} ({self.feed.upper()} trades): delta {short(self.delta)} on this candle{cvd}."
+
+
+def check(bars: list[FlowBar], bar_time: datetime, side: str, lookback: int = 3, feed: str = "iex") -> Check | None:
+    """Does order flow agree with a buy or sell chart signal on the candle starting at `bar_time`?
+    Agrees: the candle's delta and the CVD change both point the signal's way (or one does and the
+    other is flat). Disagrees: the reverse. None without a flow bar for that candle (outside regular
+    hours, or no trades on the feed)."""
+    i = next((k for k, b in enumerate(bars) if b.t == bar_time), None)
+    if i is None:
+        return None
+    upto = bars[:i + 1]
+    recent = upto[-20:]
+    flat = FLAT_SHARE * sum(abs(b.delta) for b in recent) / len(recent)
+    n = min(lookback, len(upto))
+    base = upto[-n - 1].cvd if len(upto) > n else 0.0  # the session's CVD starts from zero
+    delta, change = upto[-1].delta, upto[-1].cvd - base
+    d = 1 if side == "buy" else -1
+    votes = {_vote(delta, flat) * d, _vote(change, flat) * d} - {0}
+    verdict = "agrees" if votes == {1} else "disagrees" if votes == {-1} else "mixed"
+    return Check(verdict, delta, change, n, feed)
+
+
+def cvd_trend(bars: list[FlowBar], since: datetime, until: datetime) -> tuple[int, float, datetime] | None:
+    """The CVD's move over a window, when it's more than noise: (+1 rising or -1 falling, the change,
+    the window's first candle), else None. Noise: under the average candle delta times the square
+    root of the candle count (how far a random walk of those deltas would wander)."""
+    win = [b for b in bars if since <= b.t <= until]
+    if len(win) < 3:
+        return None
+    before = [b for b in bars if b.t < since]
+    change = win[-1].cvd - (before[-1].cvd if before else 0.0)
+    noise = sum(abs(b.delta) for b in win) / len(win) * math.sqrt(len(win))
+    if abs(change) < noise:
+        return None
+    return (1 if change > 0 else -1), change, win[0].t
+
+
 class AlpacaTrades:
     """Trades for one symbol and window from Alpaca's market data API, as raw rows (light on memory).
     feed "iex" works live on the free plan; "sip" (the whole market) live needs a paid plan."""

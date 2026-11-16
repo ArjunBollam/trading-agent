@@ -22,13 +22,14 @@ the session's cumulative delta (blue line). The feed on the right explains each 
   every 10 seconds.
 - **Order flow from the trade tape.** Footprint bars, delta, cumulative delta and volume profile,
   used to spot absorption, stacked imbalances, exhaustion, divergence and failed breakouts
-  ([docs/ORDERFLOW.md](docs/ORDERFLOW.md)).
+  ([docs/ORDERFLOW.md](docs/ORDERFLOW.md)). Every chart-pattern signal also gets a second
+  opinion from the tape: order flow agrees, disagrees or is mixed.
 - **Context-aware phone alerts.** Each signal is checked against the slower trend and key price
   levels, then pushed to your phone, flagged when it goes against a position you hold.
 - **Any LLM, with automatic fallback.** Claude, Grok, Groq, Gemini or OpenRouter. When one model
   hits its rate limit or daily token budget, the next one answers.
 - **Built to be trusted.** Kill switches, a daily loss limit, runaway-order protection, a journal
-  of every decision, order and fill, and 288 tests that run against a fake broker and scripted AI
+  of every decision, order and fill, and 292 tests that run against a fake broker and scripted AI
   replies.
 
 **Tech:** Python 3.13 · LangGraph · Anthropic and OpenAI-compatible APIs · Alpaca API ·
@@ -451,6 +452,13 @@ SPY session of 2026-10-27 the check flagged the two morning sell signals (10:35,
 - the scanner's charts, with tooltips
 - a panel under each dashboard chart: every candle's delta (shares bought at the offer minus shares
   sold at the bid) as green or red bars, and the session's cumulative delta (CVD) as a line
+- a check on every chart-pattern signal (breakouts, support tests, head and shoulders, candlesticks
+  and the rest): **order flow agrees** when the signal candle's delta and the CVD over the last 3
+  candles point the signal's way, **disagrees** when they point against it, **mixed** otherwise.
+  It shows as a tag in the signal feed and tooltip, and in the phone alert's title and text
+  (`orderflow.check_signals`, `orderflow.check_bars`)
+- the scanner's bigger picture: a CVD clearly rising or falling over the last 3 hours counts as a
+  weight-1 factor (`orderflow.in_context`)
 
 It is **off in the code's defaults**; this repo's `config.yaml` turns it on for practice. On Alpaca's free IEX feed, the signals didn't match the market's real order flow: 1 of 20 setups in a week matched the full tape. The live version needs the paid full-market feed (`orderflow.feed: sip`).
 

@@ -167,7 +167,7 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
                              "detail": e.get("detail"), "level": e.get("level"), "held": e.get("held"),
                              "against": e.get("against_position"), "weak": bool(e.get("weak", e["kind"] in quiet)), "live": False,
                              "context": e.get("context"), "context_score": e.get("context_score"),
-                             "conflict": e.get("conflict")})
+                             "conflict": e.get("conflict"), "flow": e.get("flow"), "flow_detail": e.get("flow_detail")})
             elif e.get("event") == "live_cross":
                 rows.append({"ts": e["ts"], "time": e["ts"], "symbol": e["symbol"], "kind": "live_cross",
                              "label": f"LIVE {'above' if e['side'] == 'buy' else 'below'} {e['level']}",

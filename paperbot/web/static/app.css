@@ -136,6 +136,8 @@ table.pos td:first-child, table.pos th:first-child { text-align: left; }
 .tag.against { color: var(--warn); background: var(--warn-bg); }
 .tag.with { color: var(--buy); background: var(--buy-bg); }
 .tag.live { color: var(--accent); background: var(--accent-bg); }
+.tip-detail.flow-agrees { color: var(--buy); }
+.tip-detail.flow-disagrees { color: var(--warn); }
 
 /* tables */
 .table-wrap { overflow: auto; max-height: 70vh; }
