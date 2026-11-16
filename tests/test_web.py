@@ -140,3 +140,21 @@ def test_only_listed_commands_run(web, monkeypatch):
     r = web.post_ok("/api/commands/replay?date=2026-10-26").json()
     assert r["code"] == 0 and calls[-1][-3:] == ["replay", "--date", "2026-10-26"]
     assert {c["name"] for c in web.get("/api/commands").json()} >= {"status", "cycle", "flatten", "scan"}
+
+
+def test_every_signal_has_a_tooltip_explanation(web):
+    """The chart and list tooltips show what each signal means, with an example. None may be missing."""
+    from paperbot.patterns import LABELS
+
+    g = web.get("/api/glossary").json()
+    assert set(g) == set(LABELS) | {"live_cross"}
+    for kind, e in g.items():
+        assert e["label"] and len(e["meaning"]) > 40 and len(e["example"]) > 20, kind
+        assert (kind in formations.CANDLES) == bool(e["looks"]), kind
+    assert "VWAP" in g["vwap_reclaim"]["meaning"] and "100.30" in g["vwap_reclaim"]["example"]
+
+
+def test_patterns_tab_carries_the_explanations(web):
+    rows = {p["kind"]: p for p in web.get("/api/patterns").json()["patterns"]}
+    assert rows["double_top"]["meaning"].startswith("Two peaks") and rows["double_top"]["example"]
+    assert all(p["meaning"] and p["example"] for p in rows.values())

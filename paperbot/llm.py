@@ -7,6 +7,11 @@ into its provider's request shape, and turns the reply into a provider-neutral T
     xai        Grok through xAI's OpenAI-compatible API (structured outputs work with tools)
     groq       Open models through Groq's OpenAI-compatible API (no structured outputs with
                tools, so an answer that doesn't validate gets one tools-free reformat call)
+    gemini, openrouter
+               Fallbacks only, through their OpenAI-compatible APIs, handled like Groq
+
+FallbackLLM chains them (llm.fallbacks): when one model's daily budget is used or it's rate limited,
+the next one answers.
 """
 
 from __future__ import annotations
@@ -14,10 +19,11 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from .config import AnthropicSettings, Config, OpenAICompatSettings
+from .config import AnthropicSettings, Config, FallbackModel, OpenAICompatSettings
 from .prompt import DECISION_SCHEMA
 
 Stop = Literal["tool_use", "end_turn", "refusal", "max_tokens", "api_error", "other"]
@@ -42,6 +48,7 @@ class Turn:
     model: str | None = None
     usage: Any = None
     error: str | None = None
+    rate_limited: bool = False  # the provider said slow down or out of quota (HTTP 429)
 
 
 class LLM(Protocol):
@@ -95,7 +102,7 @@ class AnthropicLLM:
         try:
             resp = self.client.beta.messages.create(**kwargs)
         except anthropic.RateLimitError as e:
-            return Turn("api_error", error=f"Claude rate limited: {e.message}")
+            return Turn("api_error", error=f"Claude rate limited: {e.message}", rate_limited=True)
         except anthropic.APIStatusError as e:
             return Turn("api_error", error=f"Claude API error {e.status_code}: {e.message}")
         except anthropic.APIConnectionError as e:
@@ -133,6 +140,10 @@ class ProviderInfo:
 OPENAI_COMPATIBLE = {
     "xai": ProviderInfo("Grok", "https://api.x.ai/v1", "XAI_API_KEY", structured_with_tools=True),
     "groq": ProviderInfo("Groq", "https://api.groq.com/openai/v1", "GROQ_API_KEY", structured_with_tools=False),
+    "gemini": ProviderInfo("Gemini", "https://generativelanguage.googleapis.com/v1beta/openai/", "GEMINI_API_KEY",
+                           structured_with_tools=False),
+    "openrouter": ProviderInfo("OpenRouter", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY",
+                               structured_with_tools=False),
 }
 
 _REFORMAT_PROMPT = (
@@ -172,11 +183,11 @@ def decision_from_failed_generation(generation: str) -> str | None:
 
 
 class OpenAICompatLLM:
-    def __init__(self, client: Any, settings: OpenAICompatSettings, provider: str):
+    def __init__(self, client: Any, settings: OpenAICompatSettings, provider: str, name: str | None = None):
         self.client = client
         self.s = settings
         self.info = OPENAI_COMPATIBLE[provider]
-        self.name = self.info.label
+        self.name = name or self.info.label
 
     def user_message(self, text: str) -> dict:
         return {"role": "user", "content": text}
@@ -197,6 +208,8 @@ class OpenAICompatLLM:
         kwargs.setdefault("max_completion_tokens", self.s.max_tokens)
         if self.s.reasoning_effort:
             kwargs["reasoning_effort"] = self.s.reasoning_effort
+        if self.s.extra_body:
+            kwargs["extra_body"] = self.s.extra_body
         try:
             return self.client.chat.completions.create(model=self.s.model, **kwargs)
         except openai.BadRequestError as e:
@@ -205,7 +218,7 @@ class OpenAICompatLLM:
                 return ToolUseFailed(str(body.get("failed_generation") or ""), e.message)
             return Turn("api_error", error=f"{self.name} API error {e.status_code}: {e.message}")
         except openai.RateLimitError as e:
-            return Turn("api_error", error=f"{self.name} rate limited: {e.message}")
+            return Turn("api_error", error=f"{self.name} rate limited: {e.message}", rate_limited=True)
         except openai.APIStatusError as e:
             return Turn("api_error", error=f"{self.name} API error {e.status_code}: {e.message}")
         except openai.APIConnectionError as e:
@@ -274,9 +287,104 @@ class OpenAICompatLLM:
         return resp if isinstance(resp, Turn) else self._to_turn(resp)
 
 
-def make_llm(cfg: Config) -> LLM:
-    """Build the configured provider's client. Raises ValueError if its API key is missing."""
-    provider = cfg.llm.provider
+@dataclass
+class Choice:
+    llm: Any
+    key: str  # "provider:model": today's tokens are counted per model
+    model: str
+    budget: int | None
+
+
+def tokens_for(choice: Choice, llm_turns: list[dict]) -> int:
+    """Today's tokens on one model. Turns journaled before fallbacks existed carry no key: match the model."""
+    from .performance import tokens_used
+
+    return tokens_used([e for e in llm_turns
+                        if e.get("key") == choice.key or (e.get("key") is None and e.get("model") == choice.model)])
+
+
+class FallbackLLM:
+    """The configured model, then each of llm.fallbacks in order. At the start of a cycle, select() picks
+    the first model with daily budget left that isn't resting after a rate limit. If the cycle's first
+    call is rate limited, the next model answers it at once; later in a cycle the conversation already
+    holds one model's replies, so the cycle holds instead and the next one starts on the next model."""
+
+    def __init__(self, choices: list[Choice]):
+        self.choices = choices
+        self.current = 0
+        self.resting: dict[str, datetime] = {}  # key -> usable again from
+        self.switched: str | None = None  # set when turn() moved to another model; the graph journals it
+        self._used: dict[str, int] = {}
+        self._now: datetime | None = None
+
+    @property
+    def active(self) -> Choice:
+        return self.choices[self.current]
+
+    @property
+    def name(self) -> str:
+        return self.active.llm.name
+
+    @property
+    def key(self) -> str:
+        return self.active.key
+
+    def _now_(self) -> datetime:
+        return self._now or datetime.now(timezone.utc)
+
+    def _usable(self, i: int) -> bool:
+        c = self.choices[i]
+        if c.budget is not None and self._used.get(c.key, 0) >= c.budget:
+            return False
+        until = self.resting.get(c.key)
+        return until is None or until <= self._now_()
+
+    def select(self, llm_turns: list[dict], now: datetime) -> Choice | None:
+        self._used = {c.key: tokens_for(c, llm_turns) for c in self.choices}
+        self._now = now
+        for i in range(len(self.choices)):
+            if self._usable(i):
+                self.current = i
+                return self.choices[i]
+        return None
+
+    def usage(self) -> str:
+        return ", ".join(f"{c.llm.name} {self._used.get(c.key, 0):,}" + (f"/{c.budget:,}" if c.budget else "")
+                         for c in self.choices)
+
+    def _rest(self, c: Choice, error: str) -> None:
+        """Out for the day if the provider says a daily quota is spent; otherwise rest two minutes."""
+        now = self._now_()
+        daily = any(s in error.lower() for s in ("per day", "(tpd)", "(rpd)", "daily", "quota"))
+        self.resting[c.key] = ((now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                               if daily else now + timedelta(minutes=2))
+
+    def user_message(self, text: str) -> Any:
+        return self.active.llm.user_message(text)
+
+    def turn(self, system: str, messages: list, tools: list[dict], allow_tools: bool) -> Turn:
+        t = self.active.llm.turn(system, messages, tools, allow_tools)
+        while t.rate_limited:
+            self._rest(self.active, t.error or "")
+            if len(messages) != 1:  # mid-cycle: another model can't continue this one's conversation
+                return t
+            nxt = next((i for i in range(len(self.choices)) if i != self.current and self._usable(i)), None)
+            if nxt is None:
+                return t
+            self.switched = f"{self.name} was rate limited ({t.error}); switched to {self.choices[nxt].llm.name}"
+            self.current = nxt
+            t = self.active.llm.turn(system, messages, tools, allow_tools)
+        return t
+
+    def tool_results(self, results: list[tuple[str, str, bool]]) -> list[Any]:
+        return self.active.llm.tool_results(results)
+
+    def reformat(self, text: str) -> Turn | None:
+        return self.active.llm.reformat(text)
+
+
+def _single(provider: str, settings: Any, name: str | None = None) -> LLM:
+    """One provider's client. Raises ValueError if its API key is missing."""
     if provider == "anthropic":
         import anthropic
 
@@ -285,7 +393,7 @@ def make_llm(cfg: Config) -> LLM:
         if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
                 or (Path.home() / ".config" / "anthropic").exists()):
             raise ValueError("ANTHROPIC_API_KEY is not set (llm.provider is anthropic)")
-        return AnthropicLLM(anthropic.Anthropic(), cfg.llm.anthropic)
+        return AnthropicLLM(anthropic.Anthropic(), settings)
 
     import openai
 
@@ -293,4 +401,31 @@ def make_llm(cfg: Config) -> LLM:
     key = os.environ.get(info.key_env, "")
     if not key:
         raise ValueError(f"{info.key_env} is not set (llm.provider is {provider})")
-    return OpenAICompatLLM(openai.OpenAI(api_key=key, base_url=info.base_url), getattr(cfg.llm, provider), provider)
+    return OpenAICompatLLM(openai.OpenAI(api_key=key, base_url=info.base_url), settings, provider, name)
+
+
+def _fallback_settings(fb: FallbackModel) -> AnthropicSettings | OpenAICompatSettings:
+    if fb.provider == "anthropic":
+        return AnthropicSettings(model=fb.model, max_tokens=max(fb.max_tokens, 1024))
+    return OpenAICompatSettings(model=fb.model, max_tokens=fb.max_tokens, reasoning_effort=fb.reasoning_effort,
+                                daily_token_budget=fb.daily_token_budget, extra_body=fb.extra_body)
+
+
+def make_llm(cfg: Config) -> LLM:
+    """The configured provider, chained to llm.fallbacks if any. Raises ValueError if the main
+    provider's API key is missing; a fallback without its key is skipped with a warning."""
+    import sys
+
+    primary = _single(cfg.llm.provider, cfg.llm.active)
+    if not cfg.llm.fallbacks:
+        return primary
+    choices = [Choice(primary, f"{cfg.llm.provider}:{cfg.llm.model}", cfg.llm.model, cfg.llm.daily_token_budget)]
+    for fb in cfg.llm.fallbacks:
+        label = "Claude" if fb.provider == "anthropic" else OPENAI_COMPATIBLE[fb.provider].label
+        try:
+            llm = _single(fb.provider, _fallback_settings(fb), f"{label} {fb.model.split('/')[-1]}")
+        except ValueError as e:
+            print(f"paperbot: fallback {fb.provider} {fb.model} skipped: {e}", file=sys.stderr)
+            continue
+        choices.append(Choice(llm, f"{fb.provider}:{fb.model}", fb.model, fb.daily_token_budget))
+    return FallbackLLM(choices) if len(choices) > 1 else primary

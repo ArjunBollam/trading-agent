@@ -55,6 +55,99 @@ function sideBadge(side) {
   return `<span class="side-badge ${side}">${side === "buy" ? "BUY" : "SELL"}</span>`;
 }
 
+/* ---------- hover tooltips: what a signal means, with an example (paperbot/explain.py) ---------- */
+
+let glossary = {};
+let glossaryLoading = null;
+// loaded once; a failure (say, during a server restart) is retried on the next dashboard refresh
+function loadGlossary() {
+  if (glossaryLoading || Object.keys(glossary).length) return;
+  glossaryLoading = api("/api/glossary").then((g) => { glossary = g || {}; }).catch(() => {})
+    .finally(() => { glossaryLoading = null; });
+}
+loadGlossary();
+
+const tipEl = document.createElement("div");
+tipEl.className = "tip";
+tipEl.hidden = true;
+tipEl.setAttribute("role", "tooltip");
+document.body.append(tipEl);
+
+const fmtVol = (v) => (v >= 1e6 ? (v / 1e6).toFixed(2) + "M" : v >= 1e3 ? (v / 1e3).toFixed(1) + "K" : String(Math.round(v)));
+
+// show the tooltip beside a point (viewport coordinates), flipped to stay on screen
+function placeTip(x, y) {
+  tipEl.hidden = false;
+  const gap = 14, w = tipEl.offsetWidth, h = tipEl.offsetHeight;
+  let left = x + gap, top = y + gap;
+  if (left + w > window.innerWidth - 8) left = Math.max(8, x - gap - w);
+  if (top + h > window.innerHeight - 8) top = Math.max(8, y - gap - h);
+  tipEl.style.left = `${left}px`;
+  tipEl.style.top = `${top}px`;
+}
+function hideTip() { tipEl.hidden = true; }
+window.addEventListener("scroll", hideTip, { passive: true });
+
+function explainHtml(kind) {
+  const g = glossary[kind];
+  if (!g) return "";
+  return (g.looks ? `<div class="tip-row"><b>Looks like</b>${esc(g.looks)}</div>` : "") +
+    `<div class="tip-row"><b>What it means</b>${esc(g.meaning)}</div>` +
+    `<div class="tip-row tip-ex"><b>Example</b>${esc(g.example)}</div>`;
+}
+
+function signalTipHtml(s) {
+  const flags = [
+    s.live ? "live: not confirmed until the candle closes" : "",
+    s.weak ? "log only" : "",
+    s.against === true ? "against your position" : s.against === false && s.held ? "with your position" : "",
+    s.conflict ? "against the bigger picture" : "",
+  ].filter(Boolean);
+  return `<div class="tip-sig ${s.side}">
+    <div class="tip-title">${sideBadge(s.side)}<b>${esc(s.label)}</b><span class="muted">${hm(s.time)} · ${num(s.price)}</span></div>
+    ${s.detail ? `<div class="tip-detail">${esc(s.detail)}</div>` : ""}
+    ${flags.length ? `<div class="tip-flags">${flags.map((f) => `<span class="tag">${esc(f)}</span>`).join("")}</div>` : ""}
+    ${explainHtml(s.kind)}</div>`;
+}
+
+// a candle on a chart: its prices and every signal on it, the marker under the pointer first
+function chartTip(card, param) {
+  if (!param.point || param.time == null || param.point.x < 0 || param.point.y < 0) return hideTip();
+  const bar = param.seriesData.get(card.candles);
+  const vol = param.seriesData.get(card.volume);
+  const side = param.hoveredObjectId ? String(param.hoveredObjectId).split("|")[1] : null;
+  const rank = (s) => (side && s.side !== side ? 2 : 0) + (s.weak ? 1 : 0);
+  const sigs = [...(card.sigsAt?.get(param.time) || [])].sort((a, b) => rank(a) - rank(b));
+  if (!bar && !sigs.length) return hideTip();
+  let html = "";
+  if (bar) {
+    const chg = bar.open ? ((bar.close - bar.open) / bar.open) * 100 : null;
+    html += `<div class="tip-head"><b>${esc(card.el.dataset.sym)}</b><span>${etTime(new Date(param.time * 1000))} candle</span>` +
+      `<span class="${tone(chg)}">${chg == null ? "" : (chg >= 0 ? "+" : "") + chg.toFixed(2) + "%"}</span></div>` +
+      `<div class="tip-ohlc">O ${num(bar.open)} · H ${num(bar.high)} · L ${num(bar.low)} · C ${num(bar.close)}${vol ? ` · Vol ${fmtVol(vol.value)}` : ""}</div>`;
+  }
+  const shown = sigs.slice(0, 3);
+  html += shown.map(signalTipHtml).join("");
+  if (sigs.length > shown.length) html += `<div class="tip-more muted">+${sigs.length - shown.length} more on this candle, listed under Signals today</div>`;
+  else if (!sigs.length) html += `<div class="tip-more muted">No signal on this candle.</div>`;
+  tipEl.innerHTML = html;
+  const r = card.box.getBoundingClientRect();
+  placeTip(r.left + param.point.x, r.top + param.point.y);
+}
+
+// any signal or pattern name in the lists: hover it to see what it means
+document.addEventListener("mouseover", (e) => {
+  const el = e.target.closest?.("[data-explain]");
+  if (!el || !glossary[el.dataset.explain]) return;
+  tipEl.innerHTML = `<div class="tip-head"><b>${esc(glossary[el.dataset.explain].label)}</b></div>${explainHtml(el.dataset.explain)}`;
+  const r = el.getBoundingClientRect();
+  placeTip(r.left, r.bottom - 8);
+});
+document.addEventListener("mouseout", (e) => {
+  const el = e.target.closest?.("[data-explain]");
+  if (el && !el.contains(e.relatedTarget)) hideTip();
+});
+
 function effectTag(s) {
   if (s.against === true) return `<span class="tag against">against your position</span>`;
   if (s.against === false && s.held) return `<span class="tag with">with your position</span>`;
@@ -158,6 +251,7 @@ function signalId(s) {
 async function refreshDashboard() {
   if (dashboardRefresh) return dashboardRefresh;
   dashboardRefresh = (async () => {
+    loadGlossary();
     try {
       const { overview: ov, state: st, signals: sg } = await api("/api/dashboard");
       renderPills(ov);
@@ -276,6 +370,8 @@ function initializeChart(card) {
   card.candles.priceScale().applyOptions({ scaleMargins: { top: 0.08, bottom: 0.22 } });
   card.volume = card.chart.addHistogramSeries({ priceScaleId: "", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false });
   card.volume.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+  card.chart.subscribeCrosshairMove((param) => chartTip(card, param));
+  box.addEventListener("mouseleave", hideTip);
 }
 
 function renderCards() {
@@ -394,12 +490,15 @@ function updateCard(card, sym, v) {
       groups.set(k, g);
     }
     const list = [...groups.values()].sort((a, b) => a.time - b.time);
+    card.sigsAt = new Map(); // candle time -> its signals, for the hover tooltip
+    for (const g of list) card.sigsAt.set(g.time, [...(card.sigsAt.get(g.time) || []), ...g.all]);
     const labelled = new Set(list.filter((g) => g.strong.length).slice(-6));
     const markers = list.map((g) => {
       const buy = g.side === "buy";
       const lead = g.strong[0] || g.all[0];
       const name = lead.live ? "live" : lead.label.length > 16 ? lead.label.slice(0, 15) + "…" : lead.label;
       return {
+        id: `${g.time}|${g.side}`,
         time: g.time,
         position: buy ? "belowBar" : "aboveBar",
         shape: g.strong.length ? (buy ? "arrowUp" : "arrowDown") : "circle",
@@ -465,7 +564,7 @@ function signalItem(s, isNew) {
   const tags = [s.live ? `<span class="tag live">live</span>` : "", s.weak ? `<span class="tag">log only</span>` : "", effectTag(s), contextTag(s)].join("");
   return `<li class="${s.weak ? "weak" : ""}${isNew ? " new" : ""}">
     <div class="line1"><span class="t">${hm(s.time)}</span>${sideBadge(s.side)}<span class="sym">${esc(s.symbol)}</span>
-      <span class="lab">${esc(s.label)}</span><span class="px">@ ${num(s.price)}</span>${tags}</div>
+      <span class="lab" data-explain="${esc(s.kind)}">${esc(s.label)}</span><span class="px">@ ${num(s.price)}</span>${tags}</div>
     <div class="detail">${esc(s.detail || "")}</div></li>`;
 }
 
@@ -566,7 +665,7 @@ function renderHistory() {
   $("#sig-note").textContent = `${rows.length} signals`;
   $("#sig-table").innerHTML = `<tr><th>Time</th><th>Symbol</th><th>Side</th><th>Signal</th><th>Price</th><th>What happened</th><th>Your position</th></tr>` +
     rows.map((s) => `<tr class="${s.weak ? "muted" : ""}"><td class="mono">${hm(s.time)}</td><td><b>${esc(s.symbol)}</b></td><td>${sideBadge(s.side)}</td>
-      <td>${esc(s.label)}${s.live ? ` <span class="tag live">live</span>` : ""}${s.weak ? ` <span class="tag">log only</span>` : ""}</td>
+      <td><span data-explain="${esc(s.kind)}">${esc(s.label)}</span>${s.live ? ` <span class="tag live">live</span>` : ""}${s.weak ? ` <span class="tag">log only</span>` : ""}</td>
       <td class="mono">${num(s.price)}</td><td class="small">${esc(s.detail || "")}</td><td>${effectTag(s)} ${contextTag(s)}</td></tr>`).join("");
 }
 $("#sig-date").addEventListener("change", loadHistory);
@@ -595,12 +694,12 @@ function renderPatterns() {
   const q = $("#pat-search").value.toLowerCase();
   let html = "";
   for (const g of patData.groups) {
-    const rows = patData.patterns.filter((p) => p.group === g && (!q || (p.label + p.kind + p.about).toLowerCase().includes(q)));
+    const rows = patData.patterns.filter((p) => p.group === g && (!q || [p.label, p.kind, p.about, p.meaning].join(" ").toLowerCase().includes(q)));
     if (!rows.length) continue;
     const on = patData.on.includes(g);
     html += `<div class="pat-group-title">${GROUP_NAMES[g] || g} · ${rows.length}${on ? "" : " · group off"}</div>`;
     html += rows.map((p) => `<div class="pat${on ? "" : " groupoff"}">
-        <div class="name"><b>${esc(p.label)}</b><span title="${esc(p.about)}">${esc(p.about || p.kind)}</span></div>
+        <div class="name"><b data-explain="${esc(p.kind)}">${esc(p.label)}</b><span>${esc(p.about || p.meaning || p.kind)}</span></div>
         <div class="seg" data-kind="${p.kind}">${["alert", "log", "off"].map((v) =>
           `<button data-v="${v}" class="${(on ? p.state : "off") === v ? "on" : ""}"${on ? "" : " disabled"}>${v === "alert" ? "Alert" : v === "log" ? "Log" : "Off"}</button>`).join("")}</div>
       </div>`).join("");

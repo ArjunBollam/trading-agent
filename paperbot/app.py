@@ -38,6 +38,8 @@ class App:
     cycle_requested: bool = False  # set by a setup alert when schedule.trigger_cycle_on_signal is on
     reported_fills: set | None = None  # order ids already alerted; seeded from today's journal
     reconciled: set = field(default_factory=set)  # positions already checked for who opened them
+    flow: Any = None  # an orderflow.FlowTracker when orderflow.enabled
+    flow_checked: dict = field(default_factory=dict)  # symbol -> the last closed order-flow bar already checked
 
     def today(self):
         return self.now().astimezone(self.cfg.schedule.tz).date()
@@ -78,4 +80,18 @@ def build_default_app(config_path: str | Path, dry_run: bool = False, need_llm: 
 
         llm = make_llm(cfg)  # the provider set by llm.provider in config.yaml
     cfg.log_dir.mkdir(parents=True, exist_ok=True)
-    return build_app(cfg, broker, llm, build_channel(cfg.alerts, cfg.log_dir), dry_run=dry_run)
+    app = build_app(cfg, broker, llm, build_channel(cfg.alerts, cfg.log_dir), dry_run=dry_run)
+    app.flow = flow_tracker(cfg)
+    return app
+
+
+def flow_tracker(cfg: Config, bar_minutes: int | None = None):
+    """Today's trade tape for order-flow signals, or None when orderflow is off."""
+    if not cfg.orderflow.enabled:
+        return None
+    from .orderflow import AlpacaTrades, FlowTracker, Settings
+
+    o = cfg.orderflow
+    source = AlpacaTrades(os.environ.get("ALPACA_API_KEY", ""), os.environ.get("ALPACA_SECRET_KEY", ""), o.feed)
+    return FlowTracker(source, bar_minutes or o.bar_minutes, cfg.schedule.tz, Settings(o.delta_multiple, o.imbalance_ratio,
+                                                                        o.stacked_levels, o.confirm_bars))

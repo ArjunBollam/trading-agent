@@ -86,6 +86,23 @@ llm:
     max_tool_calls: 1
     contracts_per_underlying: 6
     daily_token_budget: 180000
+  fallbacks:                      # once a model's daily budget or rate limit runs out, the next one answers
+    - provider: groq              # each Groq model has its own free daily quota on the same key
+      model: openai/gpt-oss-20b
+      max_tokens: 2000
+      reasoning_effort: low
+      daily_token_budget: 180000
+    - provider: groq
+      model: qwen/qwen3.8-27b
+      max_tokens: 3000
+      daily_token_budget: 180000
+      extra_body: {reasoning_format: hidden}   # keeps Qwen's thinking out of its answer
+    # Free outside Groq, once its key is in .env (a fallback without a key is skipped):
+    # - provider: gemini          # GEMINI_API_KEY from Google AI Studio; free-tier prompts may be used by Google
+    #   model: gemini-flash-latest
+    #   daily_token_budget: 500000
+    # - provider: openrouter      # OPENROUTER_API_KEY; ":free" models allow 50 requests a day
+    #   model: openai/gpt-oss-120b:free
 
 alerts:
   provider: ntfy

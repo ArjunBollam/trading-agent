@@ -26,7 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
-from . import formations
+from . import formations, orderflow
 from .config import ScanConfig
 from .features import SESSION_CLOSE, Bar, atr, regular, session_of
 
@@ -57,6 +57,9 @@ FAMILIES = {
 LABELS |= formations.LABELS
 for _kind in formations.LABELS:
     FAMILIES.setdefault(_kind, _kind)  # each chart pattern has its own cooldown
+LABELS |= orderflow.LABELS
+for _kind in orderflow.LABELS:
+    FAMILIES.setdefault(_kind, _kind)  # an absorption's confirmation mustn't be held back by the absorption's cooldown
 
 CLOSING_AUCTION = time(15, 50)  # bars from here on carry the closing-auction volume
 

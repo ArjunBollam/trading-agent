@@ -59,6 +59,7 @@ class OrderFunnel:
         self.killswitch = killswitch
         self._actions: deque[datetime] = deque()  # order submissions and cancels, for runaway protection
         self._errors: deque[datetime] = deque()
+        self._closed: dict[str, Order] = {}  # order id -> its final state, once confirmed closed at the broker
         self.stop_rejections = 0
         self.stops_disabled: str | None = None  # set if the broker keeps rejecting stop orders
 
@@ -199,12 +200,30 @@ class OrderFunnel:
             if self.dry_run:
                 self.journal.log("cancel_dry_run", order_id=order.id, symbol=order.symbol, why=why)
                 return dataclasses.replace(order, status="canceled")
+            # Alpaca's open-orders list can lag: on 2026-11-09 it kept listing two stops for ~4 minutes
+            # after they were cancelled, every tick "cancelled" them again, and the repeats tripped the
+            # runaway breaker. Ask for the order itself first; a closed order needs no cancel and isn't
+            # an order action.
+            if order.id in self._closed:
+                return self._closed[order.id]
+            try:
+                current = self.broker.get_order(order.id)
+            except Exception:  # noqa: BLE001 - if the status check fails, cancel as before
+                current = order
+            if not current.is_open:
+                self._closed[order.id] = current
+                self.journal.log("cancel_skipped", order_id=order.id, symbol=order.symbol, side=order.side,
+                                 type=order.type, why=why, status=current.status,
+                                 note="already closed at the broker; the open-orders list was stale")
+                return current
             self._count(self._actions, self.cfg.risk.max_order_actions_per_10min, "order actions")
             try:
                 self.broker.cancel_order(order.id)
             except BrokerError as e:
                 self.journal.log("cancel_error", order_id=order.id, symbol=order.symbol, error=str(e))
             final = wait_until_closed(self.broker, order.id)
+            if not final.is_open:
+                self._closed[order.id] = final
             self.journal.log("order_cancelled", order_id=order.id, symbol=order.symbol, side=order.side,
                              type=order.type, why=why, final_status=final.status, filled_qty=final.filled_qty)
             return final

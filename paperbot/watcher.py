@@ -145,6 +145,43 @@ def maybe_signals(app: App) -> None:
                 app.cycle_requested = True  # don't wait for the next slot; the runner starts a cycle now
 
 
+def maybe_orderflow(app: App) -> None:
+    """Order-flow signals on each newly closed bar, journaled; setups also alerted, and an AI cycle
+    started if schedule.trigger_cycle_on_signal. Information only: nothing here places an order."""
+    cfg = app.cfg
+    now = app.now().astimezone(cfg.schedule.tz)
+    if app.flow is None or not app.gate.in_trading_window(now):
+        return
+    from .orderflow import analyze
+    from .research import prior_levels
+
+    stocks = None
+    for sym in cfg.risk.universe:
+        try:
+            closed = app.flow.update(sym, now).closed(now)
+        except Exception as e:
+            app.journal.log("orderflow_failed", symbol=sym, error=repr(e))
+            continue
+        if not closed or app.flow_checked.get(sym) == closed[-1].t:
+            continue
+        app.flow_checked[sym] = closed[-1].t
+        if stocks is None:
+            stocks = app.broker.stock_snapshots(cfg.risk.universe)
+        prior = prior_levels(stocks[sym]) if sym in stocks else {}
+        logged = {(e.get("kind"), e.get("bar_time")) for e in app.journal.events(now.date(), "orderflow_signal")
+                  if e.get("symbol") == sym}
+        for sig in analyze(closed, prior, app.flow.settings):
+            if sig.bar_time != closed[-1].t or (sig.kind, sig.bar_time.isoformat()) in logged:
+                continue
+            app.journal.log("orderflow_signal", symbol=sym, kind=sig.kind, side=sig.side, bar_time=sig.bar_time.isoformat(),
+                            price=sig.price, detail=sig.detail, level=sig.level, weak=sig.weak, entry=sig.entry,
+                            stop=sig.stop, target=sig.target, feed=cfg.orderflow.feed)
+            if sig.setup and not sig.weak and cfg.orderflow.alert_setups:
+                app.alerts.send(f"Order flow: {sym}", f"{sig.label}. {sig.detail}", "default", ["bar_chart"])
+                if cfg.schedule.trigger_cycle_on_signal:
+                    app.cycle_requested = True
+
+
 def watch_tick(app: App) -> ProtectReport | None:
     if app.killswitch.all_halted():
         return None
@@ -155,4 +192,5 @@ def watch_tick(app: App) -> ProtectReport | None:
     rep = protect(app, slot=f"w{app.now():%Y%m%dT%H%M%S}")
     report_fills(app)  # after protection, so a data hiccup here can't delay exits
     maybe_signals(app)
+    maybe_orderflow(app)
     return rep

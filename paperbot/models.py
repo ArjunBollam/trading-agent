@@ -228,6 +228,7 @@ class Snapshot:
     candidates: dict[str, list[Contract]] = field(default_factory=dict)
     quotes: dict[str, Quote] = field(default_factory=dict)
     features: dict = field(default_factory=dict)  # symbol -> features.IntradayFeatures
+    orderflow: dict = field(default_factory=dict)  # symbol -> orderflow.summary(...)
     stale: list[str] = field(default_factory=list)  # underlyings whose market data is too old
 
 

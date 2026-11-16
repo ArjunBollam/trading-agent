@@ -130,7 +130,8 @@ class ScanResult:
 
 class Scanner:
     def __init__(self, source: MarketSource, cfg: Config, account: str, journal: Journal, alerts: Alerts,
-                 now: Callable[[], datetime], only: set[str] | None = None, state_path: Path | None = None):
+                 now: Callable[[], datetime], only: set[str] | None = None, state_path: Path | None = None,
+                 flow=None):
         self.source = source
         self.cfg = cfg
         self.account = account
@@ -150,6 +151,7 @@ class Scanner:
         self.marks: dict[str, float] = {}
         self.forming: dict[str, list] = {}  # symbol -> [bar start, open, high, low, close] from live prices
         self.no_data: list[str] = []  # symbols the last scan got no bars for
+        self.flow = flow  # an orderflow.FlowTracker, or None
 
     def _seed(self, day: date) -> None:
         """Remember today's alerted signals, including ones another process sent (a restart, the
@@ -161,6 +163,25 @@ class Scanner:
             t = datetime.fromisoformat(e["bar_time"])
             if key not in self.last_fired or t > self.last_fired[key]:
                 self.last_fired[key] = t
+
+    def _flow_signals(self, sym: str, bars: list[Bar], day: date, now: datetime, catch_up: bool) -> list[ChartSignal]:
+        """Order-flow signals (orderflow.py) from the trade tape, on the last completed bar, or on every
+        bar with catch_up. A tape outage costs only these signals."""
+        if self.flow is None or not self.cfg.orderflow.in_scan:
+            return []
+        prev = [b for b in bars if b.t.date() < day and regular(b)]
+        last = max((b.t.date() for b in prev), default=None)
+        prev = [b for b in prev if b.t.date() == last]
+        prior = {"prior high": max(b.h for b in prev), "prior low": min(b.l for b in prev), "prior close": prev[-1].c} if prev else {}
+        try:
+            fbars, sigs = self.flow.signals(sym, now, prior)
+        except Exception as e:
+            self.journal.log("orderflow_failed", symbol=sym, error=repr(e))
+            return []
+        if not fbars:
+            return []
+        keep = sigs if catch_up else [s for s in sigs if s.bar_time == fbars[-1].t]
+        return [ChartSignal(sym, s.kind, s.side, s.price, s.bar_time, s.detail, s.level, s.weak) for s in keep]
 
     def scan(self, send_alerts: bool = True, catch_up: bool = False) -> ScanResult:
         """Signals on the last completed bar, or with catch_up on every completed bar since the open
@@ -203,6 +224,7 @@ class Scanner:
             last_signals, summary = analyze(sym, bars, day, sc, day_bars)
             ctx = contexts[sym] = assess(bars, day, sc)
             signals += [(sig, ctx) for sig in last_signals]
+            signals += [(sig, ctx) for sig in self._flow_signals(sym, bars, day, now, catch_up)]
             summaries.append(summary)
             today_bars = [b for b in bars if b.t.date() == day]
             # before today's first candle (overnight, or a restart then) the page shows the last session's

@@ -102,6 +102,9 @@ def build_snapshot(app: App) -> Snapshot:
         features = intraday_features(app, sym, stock)
         if features is not None:
             snap.features[sym] = features
+        flow = orderflow_summary(app, sym, stock)
+        if flow:
+            snap.orderflow[sym] = flow
     held = [p.symbol for p in positions if p.option]
     snap.quotes = broker.option_quotes(held) if held else {}
     return snap
@@ -116,6 +119,25 @@ def intraday_features(app: App, symbol: str, stock):
     except Exception as e:
         app.journal.log("features_failed", symbol=symbol, error=repr(e))
         return None
+
+
+def prior_levels(stock) -> dict[str, float]:
+    return {k: v for k, v in (("prior high", stock.prev_high), ("prior low", stock.prev_low),
+                              ("prior close", stock.prev_close)) if v}
+
+
+def orderflow_summary(app: App, symbol: str, stock) -> dict:
+    """Context like the features: an outage of the trade tape shouldn't stop the cycle."""
+    if app.flow is None or not app.cfg.orderflow.in_prompt:
+        return {}
+    try:
+        from .orderflow import summary
+
+        bars, signals = app.flow.signals(symbol, app.now(), prior_levels(stock))
+        return summary(bars, signals, app.cfg.orderflow.feed)
+    except Exception as e:
+        app.journal.log("orderflow_failed", symbol=symbol, error=repr(e))
+        return {}
 
 
 class ToolInputError(ValueError):

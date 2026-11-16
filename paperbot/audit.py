@@ -130,15 +130,20 @@ def audit(cfg: Config, today: date | None = None, equity: float = 100_000) -> li
     # AI budget
     if cfg.llm.provider == "groq":
         est = m["ai_tokens_per_day_estimate"]
-        level: Level = "warn" if est > GROQ_FREE_DAILY_TOKENS else "ok"
-        msg = (f"about {m['decision_cycles_per_day']:.0f} cycles a day, roughly {est / 1000:,.0f}K Groq tokens "
-               f"(free tier reported at ~{GROQ_FREE_DAILY_TOKENS // 1000}K/day).")
         budget = cfg.llm.daily_token_budget
+        chain = [f for f in cfg.llm.fallbacks if f.daily_token_budget]
+        if budget is not None and chain:  # each fallback model adds its own daily budget
+            budget += sum(f.daily_token_budget for f in chain)
+        free = GROQ_FREE_DAILY_TOKENS * (1 + sum(1 for f in cfg.llm.fallbacks if f.provider == "groq"))
+        level: Level = "warn" if est > free else "ok"
+        msg = (f"about {m['decision_cycles_per_day']:.0f} cycles a day, roughly {est / 1000:,.0f}K Groq tokens "
+               f"(free tier reported at ~{GROQ_FREE_DAILY_TOKENS // 1000}K/day per model"
+               + (f", {1 + len(cfg.llm.fallbacks)} models in the fallback chain" if cfg.llm.fallbacks else "") + ").")
         if budget is not None and est > budget:
             per_cycle = est / max(m["decision_cycles_per_day"], 1)
             minutes = budget / per_cycle * s.decision_interval_minutes
             start = s.trading_start.hour * 60 + s.trading_start.minute + minutes
-            msg += (f" The {budget / 1000:,.0f}K daily budget would stop AI cycles around {int(start // 60):02d}:"
+            msg += (f" The {budget / 1000:,.0f}K daily budget{' across the chain' if chain else ''} would stop AI cycles around {int(start // 60):02d}:"
                     f"{int(start % 60):02d} ET (exits keep running); measured cycles have used less, so it may last longer.")
         add(level, "ai", msg)
     return out

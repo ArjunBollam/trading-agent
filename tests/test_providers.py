@@ -104,6 +104,7 @@ def test_rate_limit_holds_and_alerts(provider_app, broker, channel):
 
 
 def test_make_llm_picks_the_provider_and_needs_its_key(cfg, monkeypatch):
+    cfg.llm.fallbacks = []  # one provider on its own; the chain is in test_fallback.py
     cfg.llm.provider = "groq"
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     with pytest.raises(ValueError, match="GROQ_API_KEY"):

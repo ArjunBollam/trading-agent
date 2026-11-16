@@ -163,6 +163,36 @@ def test_stale_entries_and_orphan_sells_are_cancelled(app, broker, clock):
     assert entry_id in broker.cancelled
 
 
+def test_stale_open_orders_list_does_not_trip_runaway_protection(app, broker, cfg, clock):
+    """Alpaca's open-orders list kept returning two already-cancelled stops for minutes (2026-11-09).
+    Re-cancelling them every tick counted as order actions until HALT_ALL tripped."""
+    import dataclasses
+
+    cfg.risk.max_order_actions_per_10min = 5
+    stale = [Order(oid, f"pb-stop-{oid}", sym, "sell", 1, 0, "stop", "new", None, 1.0, clock())
+             for oid, sym in (("old1", "SPY261030C00749000"), ("old2", "QQQ261030C00675000"))]
+    for o in stale:  # closed at the broker...
+        broker.orders[o.id] = dataclasses.replace(o, status="canceled")
+    broker.open_orders = lambda: list(stale)  # ...but still listed as open
+    for i in range(20):
+        protect(app, f"w{i}")
+        clock.advance(seconds=10)
+    assert app.killswitch.all_halted() is None
+    assert broker.cancelled == [] and len(app.funnel._actions) == 0
+    skipped = app.journal.events(app.today(), "cancel_skipped")
+    assert sorted(e["order_id"] for e in skipped) == ["old1", "old2"]  # logged once each, not every tick
+    assert app.journal.events(app.today(), "order_cancelled") == []
+
+
+def test_cancel_still_works_when_the_order_is_open(app, broker, clock):
+    broker.orders["live"] = Order("live", "pb-stop-live", "QQQ261030C00500000", "sell", 1, 0, "stop", "new",
+                                  None, 1.0, clock())
+    final = app.funnel.cancel(broker.orders["live"], "test")
+    assert final.status == "canceled" and broker.cancelled == ["live"] and len(app.funnel._actions) == 1
+    assert app.funnel.cancel(broker.orders["live"], "again").status == "canceled"
+    assert broker.cancelled == ["live"] and len(app.funnel._actions) == 1  # no second cancel, no second action
+
+
 def test_daily_loss_limit_flattens_once_and_halts_for_the_day(app, broker, channel):
     broker.add_position(CALL, 1, 2.0)
     broker.set_equity(97_900)

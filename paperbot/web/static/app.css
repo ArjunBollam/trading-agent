@@ -206,3 +206,25 @@ pre.console { background: #07090d; border: 1px solid var(--line); border-radius:
   nav button { flex: none; }
   .pat-list, .settings { grid-template-columns: 1fr; }
 }
+
+/* hover tooltips: a candle's prices and signals, or what a signal means (paperbot/explain.py) */
+.tip {
+  position: fixed; z-index: 60; width: max-content; max-width: min(360px, calc(100vw - 16px));
+  background: #0f1319; border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .5); padding: 10px 12px;
+  font-size: 12px; line-height: 1.45; color: var(--text); pointer-events: none;
+}
+.tip[hidden] { display: none; }
+.tip-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.tip-ohlc { color: var(--muted); font-family: var(--mono); font-size: 11px; margin-top: 2px; }
+.tip-sig { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
+.tip-title { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.tip-sig.buy .tip-title b { color: var(--buy); }
+.tip-sig.sell .tip-title b { color: var(--sell); }
+.tip-detail { color: var(--muted); margin-top: 3px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.tip-flags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.tip-row { margin-top: 6px; }
+.tip-row b { display: block; font-size: 10px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--faint); }
+.tip-ex { color: var(--muted); }
+.tip-more { margin-top: 8px; font-size: 11px; }
+[data-explain] { cursor: help; text-decoration: underline dotted var(--faint); text-underline-offset: 3px; }

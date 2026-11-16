@@ -11,7 +11,7 @@ import os
 from datetime import date as date_
 from datetime import datetime, time, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 import yaml
@@ -162,6 +162,22 @@ class OpenAICompatSettings(BaseModel):
     daily_token_budget: int | None = Field(None, ge=1000, description="skip AI cycles once today's tokens reach this")
     max_tool_calls: int | None = Field(None, ge=0, le=20)
     contracts_per_underlying: int | None = Field(None, ge=2, le=40)
+    # Provider-specific request fields, e.g. {"reasoning_format": "hidden"} for Qwen on Groq.
+    extra_body: dict[str, Any] = Field(default_factory=dict)
+
+
+class FallbackModel(BaseModel):
+    """A model the bot switches to when every model before it is out for the day: its daily token budget
+    is used, or the provider rate-limited it. Each Groq model has its own free daily quota, so another
+    model on the same key is the simplest fallback. gemini and openrouter need GEMINI_API_KEY or
+    OPENROUTER_API_KEY in .env; a fallback whose key isn't set is skipped."""
+
+    provider: Literal["anthropic", "xai", "groq", "gemini", "openrouter"]
+    model: str
+    max_tokens: int = Field(2000, ge=256)
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    daily_token_budget: int | None = Field(None, ge=1000, description="stop using this model once today's tokens on it reach this")
+    extra_body: dict[str, Any] = Field(default_factory=dict)
 
 
 class LLMConfig(BaseModel):
@@ -175,6 +191,7 @@ class LLMConfig(BaseModel):
         model="openai/gpt-oss-120b", max_tokens=2000, reasoning_effort="low",
         max_tool_calls=2, contracts_per_underlying=6, daily_token_budget=180_000,
     )
+    fallbacks: list[FallbackModel] = Field(default_factory=list)  # tried in order once the provider above is out
 
     @property
     def active(self) -> AnthropicSettings | OpenAICompatSettings:
@@ -265,6 +282,24 @@ class ScanConfig(BaseModel):
     oauth_callback_port: int = Field(33418, ge=1024, le=65535, description="Local port for the Robinhood sign-in redirect")
 
 
+class OrderFlowConfig(BaseModel):
+    """Order flow from the trade tape (orderflow.py): absorption, imbalances, exhaustion, divergence, and
+    Fabio Valentini's trend and failed-breakout models. Off by default: on the free IEX feed the signals
+    don't match the market's real order flow (docs/ORDERFLOW.md). Turn on with feed: sip, which needs
+    Alpaca's paid market data plan for live use. `paperbot orderflow` studies any past day either way."""
+
+    enabled: bool = False
+    feed: Literal["iex", "sip"] = "iex"
+    bar_minutes: Literal[1, 5, 15] = 5
+    delta_multiple: float = Field(1.5, gt=0, description="Heavy aggression: |delta| this many times the recent average")
+    imbalance_ratio: float = Field(2.5, gt=1, description="Diagonal imbalance ratio for a stacked imbalance")
+    stacked_levels: int = Field(3, ge=2, description="Consecutive imbalanced prices that make a stack")
+    confirm_bars: int = Field(3, ge=1, description="Bars an absorption has to be confirmed in")
+    alert_setups: bool = True  # phone alert, and an AI cycle if schedule.trigger_cycle_on_signal, on each setup
+    in_prompt: bool = True  # give the AI a summary of today's order flow each cycle
+    in_scan: bool = True  # show order-flow signals on the scanner's charts and alerts
+
+
 class Config(BaseModel):
     account_number: str | None = None
     options_feed: Literal["indicative", "opra"] = "indicative"
@@ -277,6 +312,7 @@ class Config(BaseModel):
     llm: LLMConfig = LLMConfig()
     alerts: AlertConfig = AlertConfig()
     scan: ScanConfig = ScanConfig()
+    orderflow: OrderFlowConfig = OrderFlowConfig()
     strategy: str
 
     @model_validator(mode="after")

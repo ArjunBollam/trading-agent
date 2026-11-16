@@ -30,7 +30,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from .. import formations
+from .. import explain, formations
 from ..config import Config, ScanConfig
 from ..journal import Journal
 from ..livelist import LiveList
@@ -216,7 +216,9 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
             state = ("off" if group not in sc.pattern_groups or kind in sc.disabled_patterns
                      else "log" if kind in sc.log_only_patterns else "alert")
             desc = formations.CANDLES.get(kind, ("", ""))[1]
-            rows.append({"group": group, "kind": kind, "label": label, "state": state, "about": desc})
+            meaning, example = explain.EXPLAIN[kind]
+            rows.append({"group": group, "kind": kind, "label": label, "state": state, "about": desc,
+                         "meaning": meaning, "example": example})
         return rows
 
     async def patterns(request: Request) -> Response:
@@ -371,9 +373,16 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
         read it (no CORS headers, and other Host names are refused), the same as the token in the page."""
         return JSONResponse({"token": token}, headers={"Cache-Control": "no-store"})
 
+    glossary = explain.glossary()
+
+    async def glossary_view(request: Request) -> Response:
+        """What every signal kind means, with an example, for the chart and list tooltips."""
+        return JSONResponse(glossary)
+
     routes = [
         Route("/", index),
         Route("/api/token", token_view),
+        Route("/api/glossary", glossary_view),
         Route("/api/overview", overview),
         Route("/api/status", status),
         Route("/api/dashboard", dashboard),

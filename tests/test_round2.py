@@ -204,6 +204,7 @@ def test_audit_flags_risky_combinations(cfg):
     cfg.exits.broker_stop = False
     cfg.risk.earnings = [e for e in cfg.risk.earnings if e.symbol != "NVDA"]
     cfg.llm.provider = "groq"
+    cfg.llm.fallbacks = []  # one model: 5-minute cycles outrun its free daily tokens
     cfg.schedule.decision_interval_minutes = 5
     warns = [f.message for f in audit(cfg, date(2026, 10, 25)) if f.level == "warn"]
     assert any("broker_stop is off" in w for w in warns)

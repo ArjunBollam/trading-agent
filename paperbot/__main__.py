@@ -111,8 +111,11 @@ def robinhood_command(args, config_path: Path) -> int:
 
     journal = Journal(cfg.log_dir, now)
     alerts = Alerts(build_channel(cfg.alerts, cfg.log_dir), cfg.alerts, journal, now)
+    from .app import flow_tracker
+
     scanner = Scanner(rh, cfg, account, journal, alerts, now, only,
-                      state_path=cfg.log_dir / "scan_state.json" if args.live else None)
+                      state_path=cfg.log_dir / "scan_state.json" if args.live else None,
+                      flow=flow_tracker(cfg, cfg.scan.bar_minutes))
     try:
         if args.live:
             what = f"{', '.join(sorted(only))} on {mask(account)}" if only else mask(account)
@@ -129,6 +132,65 @@ def robinhood_command(args, config_path: Path) -> int:
     except RobinhoodError as e:
         print(f"paperbot: {e}", file=sys.stderr)
         return 1
+    return 0
+
+
+def orderflow_command(args, config_path: Path) -> int:
+    """A past session's order-flow signals and what happened after each, from Alpaca's trade tape."""
+    import os
+    from datetime import date as date_, datetime, timedelta
+
+    from . import orderflow as of
+    from .config import load_dotenv
+
+    load_dotenv(config_path.parent / ".env")
+    cfg = Config.load(config_path)
+    tz, o = cfg.schedule.tz, cfg.orderflow
+    try:
+        source = of.AlpacaTrades(os.environ.get("ALPACA_API_KEY", ""), os.environ.get("ALPACA_SECRET_KEY", ""), args.feed)
+    except ValueError as e:
+        print(f"paperbot: {e}", file=sys.stderr)
+        return 2
+    last = date_.fromisoformat(args.date) if args.date else datetime.now(tz).date() - timedelta(days=1)
+    days = []
+    while len(days) < args.days:
+        if last.weekday() < 5:
+            days.append(last)
+        last -= timedelta(days=1)
+    settings = of.Settings(o.delta_multiple, o.imbalance_ratio, o.stacked_levels, o.confirm_bars)
+    feed = "the full tape (SIP)" if args.feed == "sip" else "IEX only, a few percent of volume"
+    results: list[float] = []
+    for day in sorted(days):
+        for sym in [s.strip().upper() for s in args.symbols.split(",") if s.strip()]:
+            tape = of.build_tape(source, sym, day, args.bar_minutes or o.bar_minutes, tz,
+                                 progress=lambda m: print(f"  fetching {m}", end="\r", file=sys.stderr, flush=True))
+            if not tape.bars:
+                print(f"{sym} {day}: no trades (a holiday, or too recent for the free plan's full tape)")
+                continue
+            prior = source.prior_day(sym, day, tz)
+            signals = of.analyze(tape.bars, prior, settings)
+            prof = of.volume_profile(tape.bars, tape.bars[-1].step * 5)
+            print(f"\n{sym} {day}, {feed}: {tape.trades:,} trades, {len(tape.bars)} bars of {tape.bar_minutes} min")
+            if prof:
+                print(f"  Point of control {prof.poc:.2f}, value area {prof.val:.2f}-{prof.vah:.2f}."
+                      + (" Prior day: " + ", ".join(f"{k.split()[1]} {v:.2f}" for k, v in prior.items()) + "." if prior else ""))
+            index = {b.t: i for i, b in enumerate(tape.bars)}
+            for sg in signals:
+                if sg.weak and not args.all:
+                    continue
+                ev = of.evaluate(sg, tape.bars[index[sg.bar_time] + 1:])
+                if sg.setup and ev.get("r") is not None:
+                    results.append(ev["r"])
+                    after = f"-> {ev['result']}, {ev['r']:+.1f}R"
+                else:
+                    after = f"-> next 30 min {ev['move_6_bars_pct']:+.2f}% its way" if "move_6_bars_pct" in ev else ""
+                print(f"  {sg.bar_time:%H:%M} {sg.label}{' (weak: not at a key level)' if sg.weak else ''} {after}")
+                if args.detail:
+                    print(f"         {sg.detail}")
+    if results:
+        wins = sum(1 for r in results if r > 0)
+        print(f"\nSetups: {len(results)}, {wins} winners, {sum(results):+.1f}R in total, {sum(results) / len(results):+.2f}R each, "
+              "before costs. A few days of results are not evidence of an edge.")
     return 0
 
 
@@ -244,6 +306,15 @@ def main(argv: list[str] | None = None) -> int:
     live.add_argument("symbols", nargs="*", help="tickers, space- or comma-separated")
     live.add_argument("--by", default="cli", help="who changed it, kept with the list (e.g. ai, web)")
     live.add_argument("--json", action="store_true", help="print the result as JSON")
+    flow = sub.add_parser("orderflow", help="order-flow signals on a past session, and what followed (read-only)")
+    flow.add_argument("symbols", nargs="?", default="SPY", help="comma-separated, e.g. SPY,QQQ")
+    flow.add_argument("--date", help="the session, YYYY-MM-DD (default: the last weekday before today)")
+    flow.add_argument("--days", type=int, default=1, help="this many sessions, ending at --date")
+    flow.add_argument("--feed", choices=["sip", "iex"], default="sip",
+                      help="sip: the whole market (free when 15+ minutes old); iex: what the free plan sees live")
+    flow.add_argument("--bar-minutes", type=int, choices=[1, 5, 15], help="candle size (default orderflow.bar_minutes)")
+    flow.add_argument("--all", action="store_true", help="also list weak signals, the ones away from key levels")
+    flow.add_argument("--detail", action="store_true", help="print each signal's explanation")
     pats = sub.add_parser("patterns", help="every chart pattern the scan knows, by group, and whether it alerts")
     pats.add_argument("--json", action="store_true", help="print the list as JSON")
     web = sub.add_parser("web", help="the web page: live scanner dashboard, signals, patterns, settings, the paper bot")
@@ -292,6 +363,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "live-symbols":
         return live_symbols_command(args, config_path)
+    if args.command == "orderflow":
+        return orderflow_command(args, config_path)
     if args.command == "patterns":
         return patterns_command(args, config_path)
     if args.command == "web":

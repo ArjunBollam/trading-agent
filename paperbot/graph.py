@@ -70,6 +70,18 @@ def build_graph(app: App):
         app.gate.ensure_session(app.broker, today)
         if not app.rehearsal and not app.gate.in_trading_window(app.now()):
             return {"halt": "outside trading window"}
+        if hasattr(llm, "select"):  # a FallbackLLM: the first model with budget left answers this cycle
+            choice = llm.select(app.journal.events(today, "llm_turn"), app.now())
+            if choice is None:
+                if not app.journal.events(today, "token_budget_reached"):
+                    app.journal.log("token_budget_reached", models=llm.usage())
+                    app.alerts.send("AI token budget used", f"Every AI model is used up for today ({llm.usage()}). "
+                                    "No more AI cycles until tomorrow; exits and stops keep running.", "default", ["hourglass"])
+                return {"halt": f"every AI model's daily budget is used ({llm.usage()})"}
+            if choice is not llm.choices[0]:
+                note_fallback(choice.key, f"{llm.choices[0].llm.name} is out for now ({llm.usage()}); "
+                                          f"using {choice.llm.name} ({choice.model}).")
+            return account_check()
         budget = cfg.llm.daily_token_budget
         if budget is not None:
             used = tokens_used(app.journal.events(today, "llm_turn"))
@@ -79,6 +91,17 @@ def build_graph(app: App):
                     app.alerts.send("AI token budget used", f"{used:,} of {budget:,} tokens today. No more AI cycles "
                                     "until tomorrow; exits and stops keep running.", "default", ["hourglass"])
                 return {"halt": f"daily AI token budget used ({used:,}/{budget:,})"}
+        return account_check()
+
+    def note_fallback(key: str, text: str) -> None:
+        """Journal every switch; alert once per model per day."""
+        today = app.today()
+        alerted = any(e.get("key") == key for e in app.journal.events(today, "llm_fallback"))
+        app.journal.log("llm_fallback", key=key, text=text)
+        if not alerted:
+            app.alerts.send("AI fallback", text, "low", ["arrows_counterclockwise"])
+
+    def account_check() -> dict:
         acct = app.broker.account()
         if cfg.account_number and acct.account_number != cfg.account_number:
             app.alerts.send("Account mismatch", f"Broker account {acct.account_number} is not {cfg.account_number}.",
@@ -116,10 +139,14 @@ def build_graph(app: App):
         turns = state.get("turns", 0) + 1
         allow_tools = state.get("tool_calls", 0) < budget
         turn = llm.turn(system, state["messages"], tool_defs, allow_tools)
+        if getattr(llm, "switched", None):
+            note_fallback(llm.key, llm.switched)
+            llm.switched = None
         if turn.stop == "api_error":
             return {"turns": turns, "stop_reason": "api_error", "hold_reason": turn.error}
         app.journal.log(
-            "llm_turn", slot=state["slot"], provider=llm.name, turn=turns, stop_reason=turn.raw_stop,
+            "llm_turn", slot=state["slot"], provider=llm.name, key=getattr(llm, "key", None), turn=turns,
+            stop_reason=turn.raw_stop,
             model=turn.model, text=turn.text, tool_uses=[vars(c) for c in turn.tool_calls], usage=turn.usage,
         )
         return {"messages": [turn.message], "turns": turns, "stop_reason": turn.stop,
