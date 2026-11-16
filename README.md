@@ -10,6 +10,34 @@ It only trades Alpaca's paper (simulated) account. There is no live-trading code
 adapter always builds the paper client, checks that it points at `paper-api.alpaca.markets`, and
 refuses live keys (they start with `AK`).
 
+## Screenshots
+
+Captured from the local dashboard (`paperbot web`) during a live session on Nov 16, 2026.
+
+**Dashboard.** Live 5-minute charts with every buy (green) and sell (red) signal marked on the
+candle that triggered it, plus VWAP, high and low of day, prior-day and opening-range levels. Next to
+the charts is today's signal feed, with each signal explained in plain words and checked against
+the bigger picture.
+
+![Dashboard: live charts with buy and sell signals](docs/screenshots/dashboard.png)
+
+**Signals.** Every signal of the day: 116 chart patterns (24 classic, 78 candlestick,
+14 Fibonacci), 14 order-flow setups from the trade tape, and indicator events (VWAP, EMA, MACD, RSI,
+Bollinger bands, pivots). Each row says what happened and whether it goes with or against your
+position.
+
+![Signals: every signal with what happened](docs/screenshots/signals.png)
+
+**Patterns.** The full catalog, with each pattern set to alert, log only or off. Changes reach the
+running scanner within one check.
+
+![Patterns: 116 chart patterns, each set to alert, log or off](docs/screenshots/patterns.png)
+
+**Paper bot.** The control panel for the AI trading agent: kill switches, one-click commands, and
+the journal of every decision, order, fill and alert.
+
+![Paper bot: kill switch, commands and the event journal](docs/screenshots/paper-bot.png)
+
 ## Quick start
 
 ```bash
@@ -396,6 +424,23 @@ alerts "Head and shoulders forming" (or the others), with the neckline that woul
 SPY session of 2026-10-27 the check flagged the two morning sell signals (10:35, 11:20) as going against a
 15-minute uptrend; SPY went on to 771.
 
+## Order flow
+
+[orderflow.py](paperbot/orderflow.py) reads the trade tape. It covers absorption and its confirmation (Bookmap), footprint imbalances and exhaustion (Axia Futures), and Fabio Valentini's trend-continuation and failed-breakout models. The signals can go into:
+- the AI's prompt
+- the bot's setup alerts
+- the scanner's charts, with tooltips
+
+It is **off by default.** On Alpaca's free IEX feed, the signals didn't match the market's real order flow: 1 of 20 setups in a week matched the full tape. The live version needs the paid full-market feed (`orderflow.feed: sip`).
+
+To study any past session for free:
+
+```bash
+.venv/bin/python -m paperbot orderflow SPY,QQQ --date 2026-11-13 --days 5 --detail
+```
+
+[docs/ORDERFLOW.md](docs/ORDERFLOW.md) has the rules, the IEX vs full-tape comparison and a week of results.
+
 ## Web page
 
 ```bash
@@ -460,6 +505,23 @@ cycles and roughly 110–160K tokens a day. The daily summary shows the actual c
 hits a rate limit is retried briefly by the SDK; if it still fails, that cycle holds (no trade)
 and you get an alert.
 
+**Fallbacks.** `llm.fallbacks` lists models to switch to, in order, when one runs out. A model runs out when:
+- today's tokens on it reach its `daily_token_budget`, or
+- the provider rate-limits it. A daily quota rests it until midnight; a per-minute limit rests it 2 minutes.
+
+How a switch works:
+- If the first AI call of a cycle is rate limited, the next model answers that call at once.
+- Later in a cycle the bot holds instead, because the conversation already holds one model's replies.
+- You get one "AI fallback" alert per model per day.
+
+Groq counts each model's free quota separately, so every profile falls back to `openai/gpt-oss-20b`, then `qwen/qwen3.8-27b`, on the same key. That is about three times the free daily tokens. All three passed a full rehearsal cycle on the real prompt.
+
+Two providers outside Groq are ready to uncomment in the config once their key is in `.env` (a fallback without its key is skipped):
+- `gemini`: the Flash models are free with a Google AI Studio key. On the free tier, Google may use the prompts to improve its products.
+- `openrouter`: `:free` models are capped at 50 requests a day.
+
+xAI's Grok API no longer has a free tier.
+
 ## Logs
 
 `logs/YYYY-MM-DD.jsonl` has one JSON object per event: the prompt, every AI turn (with token
@@ -476,6 +538,32 @@ Run `paperbot run` under something that restarts it if it dies, such as launchd 
 systemd on Linux. You can also use `tmux` while you're trying it out. If the process dies, the
 GTC stop orders at Alpaca still protect open positions. Take-profit, the expiry close and the
 loss limit don't run until it's back.
+
+On macOS, one script sets up all three as launchd jobs: the web page, the live scanner and the paper
+bot. They start at login, keep running when no terminal is open, and come back if they stop. It needs no
+admin rights, and it replaces any older copies of the same jobs:
+
+```bash
+deploy/launchd/install.sh aggressive
+```
+
+| Job | Runs | Restarts | Log in `~/Library/Logs/paperbot/` |
+|---|---|---|---|
+| `com.paperbot.web` | `paperbot web` | always | `web.log` |
+| `com.paperbot.spy-live` | `caffeinate -i paperbot scan --live` | after a failure | `spy-live.log` |
+| `com.paperbot.bot` | `caffeinate -i paperbot --profile aggressive run` | after a failure | `bot.log` |
+
+Pass `default` or `scalp` instead of `aggressive` to change the bot's profile. Stop the terminal copies
+first: a second bot can't take the lock and keeps retrying every minute. After changing the code, restart a
+job; to remove all three:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.paperbot.bot
+```
+
+```bash
+deploy/launchd/install.sh --uninstall
+```
 
 ## What isn't verified yet
 
