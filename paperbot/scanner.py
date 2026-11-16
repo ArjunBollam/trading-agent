@@ -152,6 +152,7 @@ class Scanner:
         self.forming: dict[str, list] = {}  # symbol -> [bar start, open, high, low, close] from live prices
         self.no_data: list[str] = []  # symbols the last scan got no bars for
         self.flow = flow  # an orderflow.FlowTracker, or None
+        self.flow_bars: dict[str, list] = {}  # symbol -> today's closed order-flow bars, for the page's delta panel
 
     def _seed(self, day: date) -> None:
         """Remember today's alerted signals, including ones another process sent (a restart, the
@@ -167,6 +168,7 @@ class Scanner:
     def _flow_signals(self, sym: str, bars: list[Bar], day: date, now: datetime, catch_up: bool) -> list[ChartSignal]:
         """Order-flow signals (orderflow.py) from the trade tape, on the last completed bar, or on every
         bar with catch_up. A tape outage costs only these signals."""
+        self.flow_bars.pop(sym, None)
         if self.flow is None or not self.cfg.orderflow.in_scan:
             return []
         prev = [b for b in bars if b.t.date() < day and regular(b)]
@@ -180,6 +182,7 @@ class Scanner:
             return []
         if not fbars:
             return []
+        self.flow_bars[sym] = fbars
         keep = sigs if catch_up else [s for s in sigs if s.bar_time == fbars[-1].t]
         return [ChartSignal(sym, s.kind, s.side, s.price, s.bar_time, s.detail, s.level, s.weak) for s in keep]
 
@@ -239,6 +242,10 @@ class Scanner:
                                        for b in shown], "levels": [],  # the last item: pre-market or after hours
                               "context": {"bias": ctx.bias, "score": ctx.score,
                                           "factors": [{"side": f.side, "weight": f.weight, "text": f.text} for f in ctx.factors]}}
+            if shown_day == day and (fbars := self.flow_bars.get(sym)):
+                # per candle: start time, delta (bought at the offer minus sold at the bid), session CVD
+                self.view[sym]["flow"] = {"feed": self.cfg.orderflow.feed,
+                                          "bars": [[int(b.t.timestamp()), round(b.delta), round(b.cvd)] for b in fbars]}
             if shown:
                 prev_day = [b for b in bars if b.t.date() == max((d for d in sessions if d < shown_day), default=None)]
                 lv = watch_levels(shown, prev_day, sc.bar_minutes, vwap)

@@ -7,7 +7,8 @@ Paper trading only: no real money is ever at risk.
 
 *The dashboard during a live session (Nov 16, 2026): every buy (green) and sell (red) signal is
 marked on the candle that triggered it, next to VWAP, high and low of day, prior-day and
-opening-range levels. The feed on the right explains each signal in plain words.*
+opening-range levels. Under each chart, the order-flow panel shows every candle's delta (bars) and
+the session's cumulative delta (blue line). The feed on the right explains each signal in plain words.*
 
 ## Highlights
 
@@ -448,8 +449,10 @@ SPY session of 2026-10-27 the check flagged the two morning sell signals (10:35,
 - the AI's prompt
 - the bot's setup alerts
 - the scanner's charts, with tooltips
+- a panel under each dashboard chart: every candle's delta (shares bought at the offer minus shares
+  sold at the bid) as green or red bars, and the session's cumulative delta (CVD) as a line
 
-It is **off by default.** On Alpaca's free IEX feed, the signals didn't match the market's real order flow: 1 of 20 setups in a week matched the full tape. The live version needs the paid full-market feed (`orderflow.feed: sip`).
+It is **off in the code's defaults**; this repo's `config.yaml` turns it on for practice. On Alpaca's free IEX feed, the signals didn't match the market's real order flow: 1 of 20 setups in a week matched the full tape. The live version needs the paid full-market feed (`orderflow.feed: sip`).
 
 To study any past session for free:
 

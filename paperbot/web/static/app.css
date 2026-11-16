@@ -95,6 +95,12 @@ form.inline { display: flex; gap: 6px; }
 .up { color: var(--buy) !important; }
 .down { color: var(--sell) !important; }
 .chart { height: 340px; position: relative; }
+.flow { border-top: 1px solid var(--line); }
+.flow-legend { display: flex; gap: 12px; align-items: baseline; padding: 6px 14px 2px; font-size: 11px; color: var(--muted); flex-wrap: wrap; }
+.flow-legend b { color: var(--text); font-family: var(--mono); font-weight: 600; }
+.flow-legend > b:first-child { font-family: inherit; }
+.flow-legend .cvd-key::before { content: ""; display: inline-block; width: 12px; height: 2px; background: #60a5fa; margin-right: 5px; vertical-align: middle; }
+.flow-chart { height: 96px; position: relative; }
 .chart-loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 12px; pointer-events: none; }
 .chart-loading.error { color: var(--warn); }
 .card-foot { display: flex; gap: 10px; padding: 8px 14px 12px; flex-wrap: wrap; font-size: 12px; border-top: 1px solid var(--line); }
@@ -201,6 +207,7 @@ pre.console { background: #07090d; border: 1px solid var(--line); border-radius:
   main { padding: 12px 12px 30px; }
   .cards { grid-template-columns: 1fr; }
   .chart { height: 260px; }
+  .flow-chart { height: 72px; }
   .pills { margin-left: 0; }
   nav { order: 3; width: 100%; }
   nav button { flex: none; }

@@ -264,3 +264,25 @@ def test_scanner_shows_order_flow_signals_on_its_charts(cfg):
     sigs = scanner._flow_signals("SPY", [], DAY, now, catch_up=False)
     assert {s.kind for s in sigs} >= {"of_absorption_long"} and all(s.bar_time == OPEN + timedelta(minutes=45) for s in sigs)
     assert sigs[0].label in LABELS.values()
+
+
+def test_scanner_publishes_delta_and_cvd_for_the_page(cfg):
+    from test_scan import FakeSource, at, make_scanner, prev_session
+
+    from paperbot.features import Bar
+
+    now = OPEN + timedelta(minutes=50, seconds=5)
+    bars = prev_session() + [Bar(at(DAY, i), 100.0, 100.2, 99.8, 100.0, 1000) for i in range(10)]
+    scanner, _ = make_scanner(cfg, FakeSource({"SPY": bars}, []), lambda: now)
+    scanner.flow = FakeFlow(absorption_day())
+    scanner.scan(send_alerts=False)
+    flow = scanner.view["SPY"]["flow"]
+    fbars = absorption_day()
+    assert flow["feed"] == cfg.orderflow.feed and len(flow["bars"]) == len(fbars)
+    t, delta, cvd = flow["bars"][-1]  # the confirmation candle: buyers took over
+    assert t == int(fbars[-1].t.timestamp()) and delta == round(fbars[-1].delta) > 0 and cvd == round(fbars[-1].cvd)
+    assert {b[0] for b in flow["bars"]} <= {b[0] for b in scanner.view["SPY"]["bars"]}  # lines up with the candles
+
+    scanner.flow = None  # order flow off: no panel
+    scanner.scan(send_alerts=False)
+    assert "flow" not in scanner.view["SPY"]

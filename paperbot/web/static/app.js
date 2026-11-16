@@ -74,6 +74,7 @@ tipEl.setAttribute("role", "tooltip");
 document.body.append(tipEl);
 
 const fmtVol = (v) => (v >= 1e6 ? (v / 1e6).toFixed(2) + "M" : v >= 1e3 ? (v / 1e3).toFixed(1) + "K" : String(Math.round(v)));
+const fmtSigned = (v) => (v > 0 ? "+" : v < 0 ? "−" : "") + fmtVol(Math.abs(v));
 
 // show the tooltip beside a point (viewport coordinates), flipped to stay on screen
 function placeTip(x, y) {
@@ -125,6 +126,8 @@ function chartTip(card, param) {
     html += `<div class="tip-head"><b>${esc(card.el.dataset.sym)}</b><span>${etTime(new Date(param.time * 1000))} candle</span>` +
       `<span class="${tone(chg)}">${chg == null ? "" : (chg >= 0 ? "+" : "") + chg.toFixed(2) + "%"}</span></div>` +
       `<div class="tip-ohlc">O ${num(bar.open)} · H ${num(bar.high)} · L ${num(bar.low)} · C ${num(bar.close)}${vol ? ` · Vol ${fmtVol(vol.value)}` : ""}</div>`;
+    const fb = card.flowAt?.get(param.time);
+    if (fb) html += `<div class="tip-ohlc">Order flow: delta <b class="${tone(fb[1])}">${fmtSigned(fb[1])}</b> · CVD <b class="${tone(fb[2])}">${fmtSigned(fb[2])}</b></div>`;
   }
   const shown = sigs.slice(0, 3);
   html += shown.map(signalTipHtml).join("");
@@ -339,6 +342,10 @@ function makeCard(sym) {
       <span class="stat muted bar"></span>
     </div>
     <div class="chart"></div>
+    <div class="flow" hidden>
+      <div class="flow-legend"></div>
+      <div class="flow-chart"></div>
+    </div>
     <div class="card-foot"><span class="hold muted"></span><span class="levels"></span></div>`;
   const card = { el, keys: {}, levelLines: [] };
   const box = $(".chart", el);
@@ -359,7 +366,7 @@ function initializeChart(card) {
     autoSize: true,
     layout: { background: { type: "solid", color: "#12161d" }, textColor: "#8a93a3", fontSize: 11 },
     grid: { vertLines: { color: "#1a2029" }, horzLines: { color: "#1a2029" } },
-    rightPriceScale: { borderColor: "#232a36" },
+    rightPriceScale: { borderColor: "#232a36", minimumWidth: 84 },
     timeScale: { borderColor: "#232a36", timeVisible: true, secondsVisible: false, rightOffset: 4, tickMarkFormatter: fmt },
     localization: { timeFormatter: fmt },
     crosshair: { mode: 0 },
@@ -372,6 +379,71 @@ function initializeChart(card) {
   card.volume.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
   card.chart.subscribeCrosshairMove((param) => chartTip(card, param));
   box.addEventListener("mouseleave", hideTip);
+  initializeFlowChart(card);
+}
+
+// Order flow under the price chart: each candle's delta (green bars: more shares bought at the offer
+// than sold at the bid) and the session's cumulative delta (blue line). It has a slot for every
+// candle above, so the two charts line up and scroll together.
+function initializeFlowChart(card) {
+  const box = $(".flow-chart", card.el);
+  card.flowChart = LightweightCharts.createChart(box, {
+    autoSize: true,
+    layout: { background: { type: "solid", color: "#12161d" }, textColor: "#8a93a3", fontSize: 10 },
+    grid: { vertLines: { color: "#1a2029" }, horzLines: { visible: false } },
+    rightPriceScale: { borderColor: "#232a36", minimumWidth: 84, scaleMargins: { top: 0.1, bottom: 0.1 } },
+    timeScale: { visible: false, rightOffset: 4 },
+    crosshair: { mode: 0, horzLine: { visible: false } },
+    handleScroll: false,
+    handleScale: false,
+  });
+  card.delta = card.flowChart.addHistogramSeries({ priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false });
+  card.delta.createPriceLine({ price: 0, color: "#3b4556", lineWidth: 1, lineStyle: 2, axisLabelVisible: false });
+  card.cvd = card.flowChart.addLineSeries({
+    priceScaleId: "cvd", color: "#60a5fa", lineWidth: 2, lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false,
+  });
+  card.cvd.priceScale().applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } });
+  card.chart.timeScale().subscribeVisibleLogicalRangeChange(() => syncFlow(card));
+  card.chart.subscribeCrosshairMove((param) => flowLegend(card, param.time));
+}
+
+function syncFlow(card) {
+  const r = card.chart?.timeScale().getVisibleLogicalRange();
+  if (r && card.flowChart && card.flowShown) card.flowChart.timeScale().setVisibleLogicalRange(r);
+}
+
+function flowLegend(card, time) {
+  if (!card.flowShown) return;
+  const b = (time != null && card.flowAt?.get(time)) || card.flowLast;
+  if (!b) return;
+  $(".flow-legend", card.el).innerHTML =
+    `<b>Order flow</b><span>${etTime(new Date(b[0] * 1000))} candle</span>` +
+    `<span>delta <b class="${tone(b[1])}">${fmtSigned(b[1])}</b></span>` +
+    `<span class="cvd-key">CVD <b class="${tone(b[2])}">${fmtSigned(b[2])}</b></span>` +
+    `<span class="muted">${esc((card.flowFeed || "").toUpperCase())} trades</span>`;
+}
+
+function updateFlow(card, v, times) {
+  const flow = v.flow?.bars?.length ? v.flow : null;
+  const key = flow ? `${flow.bars.length}|${flow.bars[flow.bars.length - 1].join(",")}|${times.length}|${times[times.length - 1]}` : "";
+  if (key === card.keys.flow) return;
+  card.keys.flow = key;
+  const wasShown = card.flowShown;
+  card.flowShown = !!flow;
+  $(".flow", card.el).hidden = !flow;
+  if (!flow) return;
+  card.flowAt = new Map(flow.bars.map((b) => [b[0], b]));
+  card.flowLast = flow.bars[flow.bars.length - 1];
+  card.flowFeed = v.flow.feed;
+  // a slot for every candle above (whitespace where the tape has none: pre-market, the forming candle)
+  card.delta.setData(times.map((t) => {
+    const b = card.flowAt.get(t);
+    return b ? { time: t, value: b[1], color: b[1] >= 0 ? "rgba(34,197,94,.7)" : "rgba(239,68,68,.7)" } : { time: t };
+  }));
+  card.cvd.setData(times.map((t) => (card.flowAt.has(t) ? { time: t, value: card.flowAt.get(t)[2] } : { time: t })));
+  flowLegend(card, null);
+  syncFlow(card);
+  if (!wasShown) setTimeout(() => syncFlow(card), 300); // once autoSize has sized the newly shown panel
 }
 
 function renderCards() {
@@ -382,6 +454,7 @@ function renderCards() {
     for (const k of Object.keys(cards)) {
       chartObserver?.unobserve(cards[k].box);
       cards[k].chart?.remove();
+      cards[k].flowChart?.remove();
       delete cards[k];
     }
     root.innerHTML = `<div class="empty">Nothing to show yet. Add a symbol above; the live scanner draws it after its next check.</div>`;
@@ -392,6 +465,7 @@ function renderCards() {
     if (!order.includes(sym)) {
       chartObserver?.unobserve(cards[sym].box);
       cards[sym].chart?.remove();
+      cards[sym].flowChart?.remove();
       cards[sym].el.remove();
       delete cards[sym];
     }
@@ -472,6 +546,9 @@ function updateCard(card, sym, v) {
     card.candles.update({ time: f[0], open: f[1], high: f[2], low: f[3], close: f[4],
       ...extColors(f[4] >= f[1], lastState.session && lastState.session !== "regular") });
   }
+  const times = bars.map((b) => b[0]);
+  if (f && (!times.length || f[0] > times[times.length - 1])) times.push(f[0]);
+  updateFlow(card, v, times);
   // signal markers, snapped to the candle they belong to
   const mkKey = lastSignals.filter((s) => s.symbol === sym).map(signalId).join(",") + barKey;
   if (mkKey !== card.keys.markers) {
