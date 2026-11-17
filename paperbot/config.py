@@ -300,6 +300,9 @@ class OrderFlowConfig(BaseModel):
     in_scan: bool = True  # show order-flow signals on the scanner's charts and alerts
     check_signals: bool = True  # tag each scanner chart signal: does order flow agree with it?
     check_bars: int = Field(3, ge=1, le=12, description="Candles of CVD change a chart signal's check looks at")
+    # tag: the check is shown, nothing more. filter: a chart signal or live cross that order flow
+    # disagrees with is kept as log only (on the page, not pushed to the phone)
+    check_mode: Literal["tag", "filter"] = "tag"
     in_context: bool = True  # count a clear CVD trend in the scanner's bigger picture
 
 

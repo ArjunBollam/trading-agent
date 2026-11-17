@@ -23,13 +23,14 @@ the session's cumulative delta (blue line). The feed on the right explains each 
 - **Order flow from the trade tape.** Footprint bars, delta, cumulative delta and volume profile,
   used to spot absorption, stacked imbalances, exhaustion, divergence and failed breakouts
   ([docs/ORDERFLOW.md](docs/ORDERFLOW.md)). Every chart-pattern signal also gets a second
-  opinion from the tape: order flow agrees, disagrees or is mixed.
+  opinion from the tape: order flow agrees, disagrees or is mixed, and with
+  `orderflow.check_mode: filter` a signal the tape disagrees with stays off your phone.
 - **Context-aware phone alerts.** Each signal is checked against the slower trend and key price
   levels, then pushed to your phone, flagged when it goes against a position you hold.
 - **Any LLM, with automatic fallback.** Claude, Grok, Groq, Gemini or OpenRouter. When one model
   hits its rate limit or daily token budget, the next one answers.
 - **Built to be trusted.** Kill switches, a daily loss limit, runaway-order protection, a journal
-  of every decision, order and fill, and 292 tests that run against a fake broker and scripted AI
+  of every decision, order and fill, and 294 tests that run against a fake broker and scripted AI
   replies.
 
 **Tech:** Python 3.13 · LangGraph · Anthropic and OpenAI-compatible APIs · Alpaca API ·
@@ -456,7 +457,10 @@ SPY session of 2026-10-27 the check flagged the two morning sell signals (10:35,
   and the rest): **order flow agrees** when the signal candle's delta and the CVD over the last 3
   candles point the signal's way, **disagrees** when they point against it, **mixed** otherwise.
   It shows as a tag in the signal feed and tooltip, and in the phone alert's title and text
-  (`orderflow.check_signals`, `orderflow.check_bars`)
+  (`orderflow.check_signals`, `orderflow.check_bars`). LIVE level crosses get the same check from
+  the forming candle's delta so far. With `orderflow.check_mode: filter` (this repo's setting), a
+  signal or live cross that order flow disagrees with becomes log only: it stays on the page, grey
+  on the chart, and isn't pushed to the phone. `tag` only shows the verdict
 - the scanner's bigger picture: a CVD clearly rising or falling over the last 3 hours counts as a
   weight-1 factor (`orderflow.in_context`)
 

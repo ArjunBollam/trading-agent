@@ -173,8 +173,9 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
                              "label": f"LIVE {'above' if e['side'] == 'buy' else 'below'} {e['level']}",
                              "side": e["side"], "price": e["price"],
                              "detail": f"crossed the {e['level']} {e['level_price']:.2f} inside the forming candle",
-                             "level": e["level"], "held": None, "against": e.get("against_position"), "weak": False,
-                             "live": True})
+                             "level": e["level"], "held": None, "against": e.get("against_position"),
+                             "weak": bool(e.get("weak")), "live": True,
+                             "flow": e.get("flow"), "flow_detail": e.get("flow_detail")})
         rows.sort(key=lambda r: r["ts"], reverse=True)
         return rows
 

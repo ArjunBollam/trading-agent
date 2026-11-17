@@ -549,16 +549,19 @@ class Check:
     cvd_change: float  # CVD change over `bars` candles, the signal's included
     bars: int
     feed: str
+    forming: bool = False  # read inside a candle that hasn't closed (a live cross)
 
     def text(self) -> str:
         """"Order flow agrees (IEX trades): delta +4.7K on this candle, CVD +12.0K over the last 3 candles.\""""
         head = "is mixed" if self.verdict == "mixed" else self.verdict
         cvd = (f", CVD {short(self.cvd_change)} over the last {self.bars} candles" if self.bars > 1
                else " (the session's first)")
-        return f"Order flow {head} ({self.feed.upper()} trades): delta {short(self.delta)} on this candle{cvd}."
+        where = "so far in this candle" if self.forming else "on this candle"
+        return f"Order flow {head} ({self.feed.upper()} trades): delta {short(self.delta)} {where}{cvd}."
 
 
-def check(bars: list[FlowBar], bar_time: datetime, side: str, lookback: int = 3, feed: str = "iex") -> Check | None:
+def check(bars: list[FlowBar], bar_time: datetime, side: str, lookback: int = 3, feed: str = "iex",
+          forming: bool = False) -> Check | None:
     """Does order flow agree with a buy or sell chart signal on the candle starting at `bar_time`?
     Agrees: the candle's delta and the CVD change both point the signal's way (or one does and the
     other is flat). Disagrees: the reverse. None without a flow bar for that candle (outside regular
@@ -575,7 +578,7 @@ def check(bars: list[FlowBar], bar_time: datetime, side: str, lookback: int = 3,
     d = 1 if side == "buy" else -1
     votes = {_vote(delta, flat) * d, _vote(change, flat) * d} - {0}
     verdict = "agrees" if votes == {1} else "disagrees" if votes == {-1} else "mixed"
-    return Check(verdict, delta, change, n, feed)
+    return Check(verdict, delta, change, n, feed, forming)
 
 
 def cvd_trend(bars: list[FlowBar], since: datetime, until: datetime) -> tuple[int, float, datetime] | None:

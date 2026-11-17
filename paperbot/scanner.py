@@ -13,7 +13,7 @@ import json
 import os
 import time as time_
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
@@ -274,6 +274,8 @@ class Scanner:
                 self.last_fired[sig.key] = sig.bar_time
                 chk = (check(fbars, sig.bar_time, sig.side, self.cfg.orderflow.check_bars, feed)
                        if self.cfg.orderflow.check_signals and not sig.kind.startswith("of_") else None)
+                if chk and chk.verdict == "disagrees" and self.cfg.orderflow.check_mode == "filter" and not sig.weak:
+                    sig = replace(sig, weak=True, detail=f"{sig.detail}; order flow disagrees, so log only")
                 f = Found(sig, held.get(sym), held_options.get(sym, ()), sig_ctx, chk)
                 new.append(f)
                 if not send_alerts:
@@ -350,27 +352,47 @@ class Scanner:
             lines.append(status)
             if not crossed:
                 continue
-            texts, against = [], False
+            texts, against, loud = [], False, []
             for lv, side in crossed:
-                texts.append(f"{now:%H:%M:%S} Live: {sym} {px:.2f} crossed {'above' if side == 'buy' else 'below'} the "
-                             f"{lv.name} {lv.price:.2f} inside the {bar:%H:%M} candle; not confirmed until it closes at "
-                             f"{bar + timedelta(minutes=sc.bar_minutes):%H:%M}.")
+                chk = self._live_check(sym, now, bar, side)
+                quiet = chk is not None and chk.verdict == "disagrees" and self.cfg.orderflow.check_mode == "filter"
+                text = (f"{now:%H:%M:%S} Live: {sym} {px:.2f} crossed {'above' if side == 'buy' else 'below'} the "
+                        f"{lv.name} {lv.price:.2f} inside the {bar:%H:%M} candle; not confirmed until it closes at "
+                        f"{bar + timedelta(minutes=sc.bar_minutes):%H:%M}." + (f" {chk.text()}" if chk else "")
+                        + (" Log only: order flow disagrees." if quiet else ""))
+                texts.append(text)
                 hit = (held is not None and _against(1 if held.qty > 0 else -1, side)) or any(
                     _against(o.direction, side) for o in opts)
-                against |= hit
+                if not quiet:
+                    loud.append((lv, side, text))
+                    against |= hit
                 if send_alerts:
                     self.journal.log("live_cross", symbol=sym, level=lv.name, level_price=lv.price, price=px,
-                                     side=side, against_position=hit)
+                                     side=side, against_position=hit, weak=quiet,
+                                     flow=chk.verdict if chk else None, flow_detail=chk.text() if chk else None)
             side = crossed[-1][1]  # both ways in one tick can't happen: the price is on one side of each level
-            text = "\n".join(texts) + position_notes(side, px, held, opts, "move", live.marks)
-            lines.append(text)
-            if send_alerts:
-                names = " & ".join(lv.name for lv, _ in crossed)
+            lines.append("\n".join(texts) + position_notes(side, px, held, opts, "move", live.marks))
+            if send_alerts and loud:
+                text = "\n".join(t for _, _, t in loud) + position_notes(side, px, held, opts, "move", live.marks)
+                names = " & ".join(lv.name for lv, _, _ in loud)
                 self.alerts.send(f"LIVE {'above' if side == 'buy' else 'below'} {names}: {sym}", text,
                                  "high" if against else "default",
                                  ["zap", "chart_with_upwards_trend" if side == "buy" else "chart_with_downwards_trend"])
         self.publish(now)
         return "\n".join(lines)
+
+    def _live_check(self, sym: str, now: datetime, bar: datetime, side: str) -> Check | None:
+        """Order flow on a live cross: the forming candle's delta so far and the CVD over the last few
+        candles. Fetched only when a level is crossed; a tape outage costs only the check."""
+        of = self.cfg.orderflow
+        if self.flow is None or not of.check_signals:
+            return None
+        try:
+            bars = self.flow.update(sym, now).bars
+        except Exception as e:
+            self.journal.log("orderflow_failed", symbol=sym, error=repr(e))
+            return None
+        return check(bars, bar, side, of.check_bars, of.feed, forming=True)
 
     def _form(self, sym: str, bar: datetime, px: float) -> None:
         """The candle still forming, from the live prices seen so far, for the page to draw after the

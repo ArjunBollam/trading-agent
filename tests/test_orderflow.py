@@ -358,3 +358,54 @@ def test_chart_signals_say_whether_order_flow_agrees(cfg):
     assert all(x.flow is None for x in r.found) and not any("CVD" in fc.text for fc in r.contexts["NVDA"].factors)
     plain = Found(ChartSignal("NVDA", "breakout", "buy", 101.5, at(DAY, 10), "x"), None)
     assert "Order flow" not in plain.text()
+
+
+def test_filter_mode_keeps_signals_order_flow_disagrees_with_off_the_phone(cfg):
+    from test_scan import FakeSource, at, breakout_bars, make_scanner
+
+    def run(mode, last, sub):
+        cfg.orderflow.check_mode = mode
+        scanner, rec = make_scanner(cfg, FakeSource({"NVDA": breakout_bars()}, []), lambda: now)
+        scanner.journal = type(scanner.journal)(cfg.log_dir / sub, lambda: now)
+        scanner.flow = FakeFlow(flat_day(last=last))
+        f = next(x for x in scanner.scan().found if x.signal.kind == "breakout")
+        [e] = [e for e in scanner.journal.events(DAY, "chart_signal") if e["kind"] == "breakout"]
+        return f, e, [m for _, m, _ in rec.sent]
+
+    now = at(DAY, 11) + timedelta(seconds=10)
+    f, e, sent = run("filter", (10_000, 30_000), "a")  # sellers hit the breakout
+    assert f.signal.weak and e["weak"] and e["flow"] == "disagrees"
+    assert f.signal.detail.endswith("; order flow disagrees, so log only")
+    assert not any("Breakout" in m for m in sent)  # logged and on the page, not pushed
+    f, e, sent = run("filter", (30_000, 10_000), "b")  # buyers drove it: alerted as usual
+    assert not f.signal.weak and any("Breakout" in m and "Order flow agrees" in m for m in sent)
+    f, e, sent = run("tag", (10_000, 30_000), "c")  # tag mode only says so
+    assert not f.signal.weak and any("Breakout" in m and "Order flow disagrees" in m for m in sent)
+
+
+def test_live_crosses_are_checked_against_the_forming_candles_order_flow(cfg):
+    from test_scan import FakeSource, at, breakout_bars, make_scanner
+
+    cfg.orderflow.check_mode = "filter"
+
+    def cross(last, sub):
+        clock = [at(DAY, 10) + timedelta(seconds=5)]
+        source = FakeSource({"SPY": breakout_bars()[:-1]}, [])  # quiet so far, around 100.5
+        scanner, rec = make_scanner(cfg, source, lambda: clock[0])
+        scanner.journal = type(scanner.journal)(cfg.log_dir / sub, lambda: clock[0])
+        scanner.flow = FakeFlow(flat_day(last=last))  # the last bar is the 10:20 candle, still forming
+        scanner.scan()
+        sent = len(rec.sent)
+        source.prices = {"SPY": 101.4}  # through the prior-day high at 101
+        clock[0] = at(DAY, 10) + timedelta(minutes=1, seconds=5)
+        out = scanner.tick()
+        e = next(e for e in scanner.journal.events(DAY, "live_cross") if e["level"] == "prior-day high")
+        return out, e, rec.sent[sent:]
+
+    out, e, sent = cross((10_000, 30_000), "a")  # price up through the level, but sellers are hitting bids
+    assert "Order flow disagrees (IEX trades): delta -20.0K so far in this candle" in out and "Log only" in out
+    assert e["weak"] and e["flow"] == "disagrees" and sent == []
+    out, e, sent = cross((30_000, 10_000), "b")
+    assert not e["weak"] and e["flow"] == "agrees"
+    [(title, message, _)] = sent
+    assert title.startswith("LIVE above") and "Order flow agrees" in message

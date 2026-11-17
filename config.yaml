@@ -138,6 +138,7 @@ orderflow:                        # order flow from the trade tape (paperbot/ord
   in_scan: true                   # show order-flow signals on the scanner's charts
   check_signals: true             # tag every chart signal: order flow agrees / disagrees / mixed
   check_bars: 3                   # the check reads this candle's delta and CVD over the last 3 candles
+  check_mode: filter              # filter: signals order flow disagrees with are log only, not pushed; tag: just shown
   in_context: true                # a clear CVD trend counts (weight 1) in the bigger picture
 
 scan:                             # `paperbot scan`: read-only chart signals on your Robinhood positions
