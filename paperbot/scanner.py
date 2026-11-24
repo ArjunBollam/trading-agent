@@ -24,6 +24,7 @@ from .journal import Journal
 from .notify import Alerts
 from .orderflow import Check, check
 from .patterns import ChartSignal, Level, Summary, analyze, levels, session_vwaps
+from .qqe import qqe
 from .robinhood import Holding, MarketSource, OptionHolding, mask
 
 MARKET_OPEN, MARKET_CLOSE = time(9, 30), time(16, 0)
@@ -252,6 +253,13 @@ class Scanner:
                                        for b in shown], "levels": [],  # the last item: pre-market or after hours
                               "context": {"bias": ctx.bias, "score": ctx.score,
                                           "factors": [{"side": f.side, "weight": f.weight, "text": f.text} for f in ctx.factors]}}
+            if sc.qqe and shown:
+                # computed on regular-hours candles only, like an RTH chart; the earlier sessions warm it up
+                rth = [b for b in bars if regular(b) and b.t.date() <= shown_day]
+                self.view[sym]["qqe"] = [
+                    {"t": int(rth[s.index].t.timestamp()), "side": s.side, "rsi": round(s.rsi, 1), "line": round(s.line, 1)}
+                    for s in qqe([b.c for b in rth], sc.qqe_rsi_period, sc.qqe_smoothing, sc.qqe_factor)
+                    if rth[s.index].t.date() == shown_day]
             if shown_day == day and fbars:
                 # per candle: start time, delta (bought at the offer minus sold at the bid), session CVD
                 self.view[sym]["flow"] = {"feed": self.cfg.orderflow.feed,

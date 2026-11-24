@@ -25,12 +25,15 @@ the session's cumulative delta (blue line). The feed on the right explains each 
   ([docs/ORDERFLOW.md](docs/ORDERFLOW.md)). Every chart-pattern signal also gets a second
   opinion from the tape: order flow agrees, disagrees or is mixed, and with
   `orderflow.check_mode: filter` a signal the tape disagrees with stays off your phone.
+- **QQE Long and QQE Short labels.** The QQE signal (a smoothed RSI crossing its volatility line, with the
+  same RSI 14 / smoothing 5 / factor 4.238 settings as TradingView's "QQE signals" script) is drawn on
+  every chart as its own labels, separate from the scanner's signals. Display only: never alerted or traded.
 - **Context-aware phone alerts.** Each signal is checked against the slower trend and key price
   levels, then pushed to your phone, flagged when it goes against a position you hold.
 - **Any LLM, with automatic fallback.** Claude, Grok, Groq, Gemini or OpenRouter. When one model
   hits its rate limit or daily token budget, the next one answers.
 - **Built to be trusted.** Kill switches, a daily loss limit, runaway-order protection, a journal
-  of every decision, order and fill, and 294 tests that run against a fake broker and scripted AI
+  of every decision, order and fill, and 300 tests that run against a fake broker and scripted AI
   replies.
 
 **Tech:** Python 3.13 · LangGraph · Anthropic and OpenAI-compatible APIs · Alpaca API ·

@@ -62,7 +62,7 @@ risk:
   earnings:                       # bmo = before the open, amc = after the close. Check dates before each week.
     - {symbol: MSFT, date: 2026-10-28, time: amc}    # confirmed on Microsoft's investor relations page
     - {symbol: AAPL, date: 2026-11-02, time: amc}    # per Apple's IR page as reported by StockTitan
-    - {symbol: NVDA, date: 2026-11-18, time: amc}    # projected, not yet confirmed by NVIDIA
+    - {symbol: NVDA, date: 2026-11-17, time: amc}    # confirmed by NVIDIA's IR release: call 5 PM ET
 
 exits:
   stop_loss_pct: 35
@@ -175,6 +175,7 @@ scan:                             # `paperbot scan`: read-only chart signals on 
   fib_swing_atr: 3.0              # Fibonacci retracements of swings at least this big
   forming_near_atr: 0.5           # warn of a head and shoulders / double / triple top or bottom still forming
                                   # once price closes this close (in ATRs) to its neckline
+  qqe: true                       # QQE Long / QQE Short labels on the charts (shown only, never alerted)
 
   # The bigger picture: every signal is checked against the last few hours and a slower candle
   # (patterns that broke and still hold, ones still forming, lower highs / higher lows, trend, RSI, VWAP).

@@ -279,6 +279,12 @@ class ScanConfig(BaseModel):
     context_minutes: int = Field(180, ge=30, le=390, description="How far back the bigger picture looks, in minutes")
     context_bar_minutes: Literal[15, 30, 60] = Field(15, description="Slower candle for the bigger picture's patterns and trend")
     context_threshold: int = Field(3, ge=1, description="Bigger-picture score at which it counts as bullish or bearish")
+    # QQE (qqe.py): the QQE Long / QQE Short labels on the charts, for looking at only. Same defaults as TradingView's
+    # "QQE signals" by colinmck.
+    qqe: bool = Field(True, description="Draw QQE Long / QQE Short labels on the charts (shown only, never alerted)")
+    qqe_rsi_period: int = Field(14, ge=2, description="QQE: RSI length, in candles")
+    qqe_smoothing: int = Field(5, ge=1, description="QQE: RSI smoothing, in candles")
+    qqe_factor: float = Field(4.238, gt=0, description="QQE: how far the trailing line sits from the smoothed RSI")
     oauth_callback_port: int = Field(33418, ge=1024, le=65535, description="Local port for the Robinhood sign-in redirect")
 
 

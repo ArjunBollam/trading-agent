@@ -237,3 +237,9 @@ pre.console { background: #07090d; border: 1px solid var(--line); border-radius:
 .tip-ex { color: var(--muted); }
 .tip-more { margin-top: 8px; font-size: 11px; }
 [data-explain] { cursor: help; text-decoration: underline dotted var(--faint); text-underline-offset: 3px; }
+
+/* QQE labels: the latest signal in a card's head, the on/off box, and the tooltip's name tag */
+.qqe-toggle { font-size: 12px; color: var(--muted); display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
+.qqe-tag { padding: 0 5px; border-radius: 3px; color: #fff; }
+.qqe-tag.long { background: #1f9d55; }
+.qqe-tag.short { background: #e5484d; }

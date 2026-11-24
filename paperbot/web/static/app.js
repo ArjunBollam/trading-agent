@@ -129,6 +129,8 @@ function chartTip(card, param) {
       `<span class="${tone(chg)}">${chg == null ? "" : (chg >= 0 ? "+" : "") + chg.toFixed(2) + "%"}</span></div>` +
       `<div class="tip-ohlc">O ${num(bar.open)} · H ${num(bar.high)} · L ${num(bar.low)} · C ${num(bar.close)}${vol ? ` · Vol ${fmtVol(vol.value)}` : ""}</div>`;
     const fb = card.flowAt?.get(param.time);
+    const qq = showQqe ? card.qqeAt?.get(param.time) : null;
+    if (qq) html += `<div class="tip-ohlc"><b class="qqe-tag ${qq.side}">${QQE_STYLE[qq.side].name}</b> ${esc(qqeText(qq))}</div>`;
     if (fb) html += `<div class="tip-ohlc">Order flow: delta <b class="${tone(fb[1])}">${fmtSigned(fb[1])}</b> · CVD <b class="${tone(fb[2])}">${fmtSigned(fb[2])}</b></div>`;
   }
   const shown = sigs.slice(0, 3);
@@ -204,6 +206,9 @@ setInterval(() => ($("#clock").textContent = etTime(new Date(), true) + " ET"), 
 const cards = {}; // symbol -> { el, chart, candles, volume, levelLines, liveLine, keys }
 let seen = null; // signal ids already shown, so new ones flash
 let lastSignals = [];
+const QQE_STYLE = { long: { color: "#1f9d55", name: "QQE Long" }, short: { color: "#e5484d", name: "QQE Short" } };
+let showQqe = true;
+try { showQqe = localStorage.getItem("qqe") !== "off"; } catch { /* no storage: shown */ }
 let lastState = null;
 let liveInfo = null;
 let dashboardRefresh = null;
@@ -291,6 +296,12 @@ function renderChips() {
     (liveInfo.source === "file" && liveInfo.by ? ` · list changed by ${liveInfo.by}` : "");
 }
 
+$("#qqe-on").checked = showQqe;
+$("#qqe-on").addEventListener("change", (e) => {
+  showQqe = e.target.checked;
+  try { localStorage.setItem("qqe", showQqe ? "on" : "off"); } catch { /* no storage: this page view only */ }
+  if (lastState) renderCards();
+});
 $("#chips").addEventListener("click", async (e) => {
   const sym = e.target.dataset.remove;
   if (!sym) return;
@@ -341,6 +352,7 @@ function makeCard(sym) {
       <span class="stat">RSI <b class="rsi">–</b></span>
       <span class="stat">trend <b class="trend">–</b></span>
       <span class="stat ctx" hidden>bigger picture <b class="bias">–</b></span>
+      <span class="stat qqe" hidden>QQE <b class="qv"></b></span>
       <span class="stat muted bar"></span>
     </div>
     <div class="chart"></div>
@@ -359,6 +371,83 @@ function makeCard(sym) {
   if (chartObserver) chartObserver.observe(box);
   else loadCardChart(card);
   return card;
+}
+
+/* ---------- QQE Long / QQE Short (paperbot/qqe.py): labels on the price chart, apart from the scanner's own markers ---------- */
+
+class QqeLabels {
+  constructor() {
+    this.items = []; // { t, price, side, room }: room is the space a scanner marker already takes there
+    const view = { zOrder: () => "top", renderer: () => ({ draw: (target) => this.draw(target) }) };
+    this.views = [view];
+  }
+  attached({ chart, series, requestUpdate }) { this.chart = chart; this.series = series; this.requestUpdate = requestUpdate; }
+  detached() { this.chart = this.series = this.requestUpdate = null; }
+  updateAllViews() {}
+  paneViews() { return this.views; }
+  set(items) { this.items = items; this.requestUpdate?.(); }
+  draw(target) {
+    if (!this.chart) return;
+    target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
+      ctx.font = "600 10px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      const ts = this.chart.timeScale();
+      for (const q of this.items) {
+        const x = ts.timeToCoordinate(q.t);
+        const y = this.series.priceToCoordinate(q.price);
+        if (x == null || y == null) continue;
+        const { color, name } = QQE_STYLE[q.side];
+        const w = ctx.measureText(name).width + 12, h = 16, tip = 4;
+        const below = q.side === "long";
+        // below the candle for a long, above it for a short, with the pointer toward the candle
+        const tipY = below ? y + 3 + q.room : y - 3 - q.room;
+        let top = below ? tipY + tip : tipY - tip - h;
+        top = Math.max(1, Math.min(mediaSize.height - h - 1, top));
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.roundRect(x - w / 2, top, w, h, 3);
+        ctx.fill();
+        ctx.beginPath();
+        if (below) { ctx.moveTo(x, tipY); ctx.lineTo(x - 5, top + 1); ctx.lineTo(x + 5, top + 1); }
+        else { ctx.moveTo(x, tipY); ctx.lineTo(x - 5, top + h - 1); ctx.lineTo(x + 5, top + h - 1); }
+        ctx.fill();
+        ctx.fillStyle = "#fff";
+        ctx.fillText(name, x, top + h / 2 + 0.5);
+      }
+    });
+  }
+}
+
+function qqeText(q) {
+  return `${q.side === "long" ? "Smoothed RSI " + num(q.rsi, 1) + " crossed above" : "Smoothed RSI " + num(q.rsi, 1) + " crossed below"} its QQE line ${num(q.line, 1)}.`;
+}
+
+function updateQqe(card, v, bars) {
+  const qqe = showQqe ? v.qqe || [] : [];
+  const last = (v.qqe || []).at(-1);
+  const stat = $(".qqe", card.el);
+  stat.hidden = !last || !showQqe;
+  if (last && showQqe) {
+    const b = $(".qv", card.el);
+    b.textContent = `${last.side === "long" ? "Long" : "Short"} ${etTime(new Date(last.t * 1000))}`;
+    b.className = "qv " + (last.side === "long" ? "up" : "down");
+    stat.title = `Latest QQE signal: ${qqeText(last)}`;
+  }
+  if (!card.chart) return;
+  if (!card.qqeLabels) {
+    card.qqeLabels = new QqeLabels();
+    card.candles.attachPrimitive(card.qqeLabels);
+  }
+  const key = JSON.stringify(qqe) + "|" + card.keys.bars + "|" + card.keys.markers;
+  if (key === card.keys.qqe) return;
+  card.keys.qqe = key;
+  const byTime = new Map(bars.map((b) => [b[0], b]));
+  card.qqeAt = new Map(qqe.map((q) => [q.t, q]));
+  card.qqeLabels.set(qqe.filter((q) => byTime.has(q.t)).map((q) => ({
+    t: q.t, side: q.side, price: byTime.get(q.t)[q.side === "long" ? 3 : 2],
+    room: card.markedAt?.has(`${q.t}|${q.side === "long" ? "buy" : "sell"}`) ? 28 : 2,
+  })));
 }
 
 function initializeChart(card) {
@@ -569,6 +658,7 @@ function updateCard(card, sym, v) {
       groups.set(k, g);
     }
     const list = [...groups.values()].sort((a, b) => a.time - b.time);
+    card.markedAt = new Set(list.map((g) => `${g.time}|${g.side}`)); // so the QQE labels leave room for these markers
     card.sigsAt = new Map(); // candle time -> its signals, for the hover tooltip
     for (const g of list) card.sigsAt.set(g.time, [...(card.sigsAt.get(g.time) || []), ...g.all]);
     const labelled = new Set(list.filter((g) => g.strong.length).slice(-6));
@@ -588,6 +678,7 @@ function updateCard(card, sym, v) {
     });
     card.candles.setMarkers(markers);
   }
+  updateQqe(card, v, bars);
   // levels as price lines
   const lvKey = JSON.stringify(v.levels || []);
   if (lvKey !== card.keys.levels) {
