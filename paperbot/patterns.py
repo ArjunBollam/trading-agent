@@ -220,6 +220,21 @@ def _crossed_down(prev_a, prev_b, a, b) -> bool:
     return None not in (prev_a, prev_b, a, b) and prev_a >= prev_b and a < b
 
 
+def _trend(e9: float | None, e21: float | None) -> str | None:
+    if e9 is None or e21 is None:
+        return None
+    return "up" if e9 > e21 * 1.0005 else "down" if e9 < e21 * 0.9995 else "flat"
+
+
+def rsi_and_trend(bars: list[Bar], cfg: ScanConfig) -> tuple[float | None, str | None]:
+    """RSI and the EMA 9 / 21 trend on the last of any candles (the page's 1-minute ones), worked out as analyze does."""
+    closes = [b.c for b in bars]
+    if not closes:
+        return None, None
+    rsi = rsi_series(closes, cfg.rsi_period)[-1]
+    return None if rsi is None else round(rsi, 1), _trend(ema_series(closes, 9)[-1], ema_series(closes, 21)[-1])
+
+
 def analyze(symbol: str, bars: list[Bar], day: date, cfg: ScanConfig, daily: list[Bar] | None = None,
             ) -> tuple[list[ChartSignal], Summary]:
     """Signals on the last bar of `bars` (completed bars, oldest first). Bars from earlier sessions
@@ -234,9 +249,7 @@ def analyze(symbol: str, bars: list[Bar], day: date, cfg: ScanConfig, daily: lis
     rsi = rsi_series(closes, cfg.rsi_period)
     e9, e21 = ema_series(closes, 9), ema_series(closes, 21)
     vw = session_vwaps(today)
-    trend = None
-    if e9[-1] is not None and e21[-1] is not None:
-        trend = "up" if e9[-1] > e21[-1] * 1.0005 else "down" if e9[-1] < e21[-1] * 0.9995 else "flat"
+    trend = _trend(e9[-1], e21[-1])
     vwap_now = vw[-1] if vw else None
     summary = Summary(symbol, last.c, last.t, None if rsi[-1] is None else round(rsi[-1], 1),
                       None if vwap_now is None else round(vwap_now, 2),

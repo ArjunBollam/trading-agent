@@ -209,6 +209,9 @@ let lastSignals = [];
 const QQE_STYLE = { long: { color: "#1f9d55", name: "QQE Long" }, short: { color: "#e5484d", name: "QQE Short" } };
 let showQqe = true;
 try { showQqe = localStorage.getItem("qqe") !== "off"; } catch { /* no storage: shown */ }
+let chartTf = "base"; // the charts' candles: "1" for 1 minute, "base" for the scanner's own (5 minutes)
+try { if (localStorage.getItem("tf") === "1") chartTf = "1"; } catch { /* no storage: the scanner's own */ }
+let lastChart = null; // the 1-minute candles, fetched only while they're shown
 let lastState = null;
 let liveInfo = null;
 let dashboardRefresh = null;
@@ -263,7 +266,9 @@ async function refreshDashboard() {
   dashboardRefresh = (async () => {
     loadGlossary();
     try {
-      const { overview: ov, state: st, signals: sg } = await api("/api/dashboard");
+      const [{ overview: ov, state: st, signals: sg }, minutes] = await Promise.all([
+        api("/api/dashboard"), chartTf === "1" ? api("/api/chart?minutes=1").catch(() => null) : null]);
+      if (minutes) lastChart = minutes;
       renderPills(ov);
       liveInfo = ov.live_symbols;
       lastState = st;
@@ -279,6 +284,39 @@ async function refreshDashboard() {
   try { await dashboardRefresh; } finally { dashboardRefresh = null; }
 }
 
+const oneMinute = () => chartTf === "1" && lastState?.bar_minutes !== 1;
+
+// what a card shows: the scanner's own candles, or the 1-minute ones, each with its own RSI, trend, QQE and order flow
+// (VWAP, the levels and the bigger picture don't depend on the candles shown)
+function chartView(sym, v) {
+  if (!v || !oneMinute()) return v;
+  const c = lastChart?.symbols?.[sym];
+  return { ...v, bars: c?.bars || [], forming: c?.forming || null, qqe: c?.qqe || [], flow: c?.flow || null,
+    rsi: c?.rsi ?? null, trend: c?.trend ?? null, waiting: !c };
+}
+
+function renderTf() {
+  const base = lastState?.bar_minutes;
+  const el = $("#tf");
+  el.hidden = !base || base === 1;
+  for (const b of $$("button", el)) {
+    if (b.dataset.tf === "base") b.textContent = `${base}m`;
+    b.classList.toggle("on", b.dataset.tf === chartTf);
+    b.setAttribute("aria-pressed", b.dataset.tf === chartTf);
+  }
+}
+
+$("#tf").addEventListener("click", (e) => {
+  const tf = e.target.closest("button")?.dataset.tf;
+  if (!tf || tf === chartTf) return;
+  chartTf = tf;
+  try { localStorage.setItem("tf", tf); } catch { /* no storage: this page view only */ }
+  if (!lastState?.symbols) return;
+  renderTf();
+  renderCards();
+  if (tf === "1") refreshDashboard(); // the 1-minute candles, now rather than at the next poll
+});
+
 function renderChips() {
   const syms = liveInfo.symbols;
   const bad = new Set(lastState?.no_data || []);
@@ -289,10 +327,11 @@ function renderChips() {
       ? syms.map((s) => `<span class="chip${bad.has(s) ? " bad" : ""}" title="${bad.has(s) ? "No data from Robinhood: check the ticker" : ""}">${esc(s)}<button title="Stop scanning ${esc(s)}" data-remove="${esc(s)}">×</button></span>`).join("")
       : `<span class="muted">none set: everything you hold</span>`;
   }
+  renderTf();
   const st = lastState;
   $("#live-note").textContent =
     st.status === "off" ? "The live scanner hasn't written anything yet." :
-    `Candles every ${st.bar_minutes} min, live price every ${st.tick_seconds || "–"} s · updated ${hm(st.updated)}` +
+    `Signals on ${st.bar_minutes}-minute candles, live price every ${st.tick_seconds || "–"} s · updated ${hm(st.updated)}` +
     (liveInfo.source === "file" && liveInfo.by ? ` · list changed by ${liveInfo.by}` : "");
 }
 
@@ -349,10 +388,10 @@ function makeCard(sym) {
     <div class="card-head">
       <span class="sym">${esc(sym)}</span><span class="px num">–</span>
       <span class="stat">vs VWAP <b class="vw">–</b></span>
-      <span class="stat">RSI <b class="rsi">–</b></span>
-      <span class="stat">trend <b class="trend">–</b></span>
+      <span class="stat">RSI <i class="tf-tag"></i> <b class="rsi">–</b></span>
+      <span class="stat">trend <i class="tf-tag"></i> <b class="trend">–</b></span>
       <span class="stat ctx" hidden>bigger picture <b class="bias">–</b></span>
-      <span class="stat qqe" hidden>QQE <b class="qv"></b></span>
+      <span class="stat qqe" hidden>QQE <i class="tf-tag"></i> <b class="qv"></b></span>
       <span class="stat muted bar"></span>
     </div>
     <div class="chart"></div>
@@ -522,7 +561,10 @@ function updateFlow(card, v, times) {
   const wasShown = card.flowShown;
   card.flowShown = !!flow;
   $(".flow", card.el).hidden = !flow;
-  if (!flow) return;
+  if (!flow) {
+    card.flowAt = card.flowLast = null; // so the tooltip doesn't show another timing's numbers
+    return;
+  }
   card.flowAt = new Map(flow.bars.map((b) => [b[0], b]));
   card.flowLast = flow.bars[flow.bars.length - 1];
   card.flowFeed = v.flow.feed;
@@ -594,11 +636,20 @@ function updateCard(card, sym, v) {
   const vs = px != null && v.vwap ? ((px - v.vwap) / v.vwap) * 100 : null;
   $(".vw", el).textContent = vs == null ? "–" : (vs >= 0 ? "+" : "") + vs.toFixed(2) + "%";
   $(".vw", el).className = "vw " + tone(vs);
-  $(".rsi", el).textContent = num(v.rsi, 1);
-  $(".trend", el).textContent = v.trend || "–";
-  $(".trend", el).className = "trend " + (v.trend === "up" ? "up" : v.trend === "down" ? "down" : "");
+  const cv = chartView(sym, v); // what the chart, the RSI, the trend, QQE and the order flow show
+  const tf = oneMinute() ? "1" : "base";
+  const tfName = `${tf === "1" ? 1 : lastState.bar_minutes}m`;
+  for (const tag of $$(".tf-tag", el)) tag.textContent = tfName;
+  $(".rsi", el).textContent = num(cv.rsi, 1);
+  $(".rsi", el).parentElement.title = `RSI on ${tfName} candles, as of the last one that closed`;
+  $(".trend", el).textContent = cv.trend || "–";
+  $(".trend", el).className = "trend " + (cv.trend === "up" ? "up" : cv.trend === "down" ? "down" : "");
   const ext = lastState.session && lastState.session !== "regular" ? ` · ${SESSION_NAMES[lastState.session]}` : "";
-  $(".bar", el).textContent = v.forming ? `${etTime(new Date(v.forming[0] * 1000))} candle forming${ext}`
+  if (cv.waiting) $(".bar", el).textContent = "1-minute candles load within a minute";
+  else if (tf === "1") {
+    const lastBar = cv.forming || cv.bars[cv.bars.length - 1];
+    $(".bar", el).textContent = lastBar ? `${etTime(new Date(lastBar[0] * 1000))} 1-minute candle${cv.forming ? " forming" : ""}${ext}` : "";
+  } else $(".bar", el).textContent = v.forming ? `${etTime(new Date(v.forming[0] * 1000))} candle forming${ext}`
     : v.bar_time ? `last candle ${hm(v.bar_time)}` : "";
   const ctx = v.context;
   $(".ctx", el).hidden = !ctx;
@@ -620,7 +671,12 @@ function updateCard(card, sym, v) {
     .map((l) => `<span class="lvl"><i>${esc(SHORT[l.name] || l.name)}</i>${num(l.price)}</span>`).join(" ");
 
   if (!card.chart) return;
-  const bars = v.bars || [];
+  if (card.tf !== tf) { // switched: draw everything again
+    card.tf = tf;
+    card.keys = { levels: card.keys.levels };
+    card.fitted = false;
+  }
+  const bars = cv.bars || [];
   const barKey = bars.length ? `${bars.length}|${bars[bars.length - 1][0]}|${bars[bars.length - 1][4]}` : "";
   if (barKey !== card.keys.bars) {
     card.keys.bars = barKey;
@@ -628,18 +684,22 @@ function updateCard(card, sym, v) {
     card.volume.setData(bars.map((b) => ({ time: b[0], value: b[5], color: b[4] >= b[1] ? `rgba(34,197,94,${b[6] ? 0.15 : 0.35})` : `rgba(239,68,68,${b[6] ? 0.15 : 0.35})` })));
     if (!card.fitted && bars.length) {
       card.fitted = true;
-      setTimeout(() => card.chart.timeScale().fitContent(), 300); // once autoSize has given the chart its width
+      setTimeout(() => { // once autoSize has given the chart its width
+        const ts = card.chart.timeScale();
+        if (card.tf === "1" && bars.length > 150) ts.setVisibleLogicalRange({ from: bars.length - 120, to: bars.length + 4 }); // the last 2 hours
+        else ts.fitContent();
+      }, 300);
     }
   }
   // the candle still forming, from the scanner's live checks: it moves with every refresh
-  const f = v.forming;
+  const f = cv.forming;
   if (f && (!bars.length || f[0] > bars[bars.length - 1][0])) {
     card.candles.update({ time: f[0], open: f[1], high: f[2], low: f[3], close: f[4],
       ...extColors(f[4] >= f[1], lastState.session && lastState.session !== "regular") });
   }
   const times = bars.map((b) => b[0]);
   if (f && (!times.length || f[0] > times[times.length - 1])) times.push(f[0]);
-  updateFlow(card, v, times);
+  updateFlow(card, cv, times);
   // signal markers, snapped to the candle they belong to
   const mkKey = lastSignals.filter((s) => s.symbol === sym).map(signalId).join(",") + barKey;
   if (mkKey !== card.keys.markers) {
@@ -650,7 +710,9 @@ function updateCard(card, sym, v) {
     // one marker per candle and side; only the latest few carry a label, so the chart stays readable
     const groups = new Map();
     for (const s of sigs) {
-      const t = snap(Math.floor(new Date(s.time).getTime() / 1000));
+      // a signal is known when its 5-minute candle closes: on 1-minute charts, that candle's last minute
+      const closes = tf === "1" && !s.live ? (lastState.bar_minutes - 1) * 60 : 0;
+      const t = snap(Math.floor(new Date(s.time).getTime() / 1000) + closes);
       const k = `${t}|${s.side}`;
       const g = groups.get(k) || { time: t, side: s.side, all: [], strong: [] };
       g.all.push(s);
@@ -678,7 +740,7 @@ function updateCard(card, sym, v) {
     });
     card.candles.setMarkers(markers);
   }
-  updateQqe(card, v, bars);
+  updateQqe(card, cv, bars);
   // levels as price lines
   const lvKey = JSON.stringify(v.levels || []);
   if (lvKey !== card.keys.levels) {

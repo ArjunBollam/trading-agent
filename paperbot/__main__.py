@@ -115,7 +115,8 @@ def robinhood_command(args, config_path: Path) -> int:
 
     scanner = Scanner(rh, cfg, account, journal, alerts, now, only,
                       state_path=cfg.log_dir / "scan_state.json" if args.live else None,
-                      flow=flow_tracker(cfg, cfg.scan.bar_minutes))
+                      flow=flow_tracker(cfg, cfg.scan.bar_minutes),
+                      minute_flow=flow_tracker(cfg, 1) if args.live and cfg.scan.bar_minutes != 1 else None)
     try:
         if args.live:
             what = f"{', '.join(sorted(only))} on {mask(account)}" if only else mask(account)

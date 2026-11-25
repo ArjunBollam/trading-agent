@@ -23,7 +23,7 @@ from .features import SESSIONS, Bar, atr, regular, session_of
 from .journal import Journal
 from .notify import Alerts
 from .orderflow import Check, check
-from .patterns import ChartSignal, Level, Summary, analyze, levels, session_vwaps
+from .patterns import ChartSignal, Level, Summary, analyze, levels, rsi_and_trend, session_vwaps
 from .qqe import qqe
 from .robinhood import Holding, MarketSource, OptionHolding, mask
 
@@ -135,7 +135,7 @@ class ScanResult:
 class Scanner:
     def __init__(self, source: MarketSource, cfg: Config, account: str, journal: Journal, alerts: Alerts,
                  now: Callable[[], datetime], only: set[str] | None = None, state_path: Path | None = None,
-                 flow=None):
+                 flow=None, minute_flow=None):
         self.source = source
         self.cfg = cfg
         self.account = account
@@ -154,6 +154,12 @@ class Scanner:
         self.prices: dict[str, float] = {}
         self.marks: dict[str, float] = {}
         self.forming: dict[str, list] = {}  # symbol -> [bar start, open, high, low, close] from live prices
+        self.minute: dict[str, dict[datetime, Bar]] = {}  # 1-minute candles, for the page's 1m charts only
+        self.minute_stats: dict[str, dict] = {}  # symbol -> QQE, RSI and trend on them, and their order flow
+        self.minute_flow = minute_flow  # a FlowTracker on 1-minute candles, apart from the one signals use
+        self.minute_forming: dict[str, list] = {}
+        self._minute_at: datetime | None = None  # the minute they were last looked for in
+        self._minute_ok: dict[str, datetime] = {}  # symbol -> the minute of its last good fetch
         self.no_data: list[str] = []  # symbols the last scan got no bars for
         self.flow = flow  # an orderflow.FlowTracker, or None
         self.flow_bars: dict[str, list] = {}  # symbol -> today's closed order-flow bars, for the page's delta panel
@@ -254,12 +260,7 @@ class Scanner:
                               "context": {"bias": ctx.bias, "score": ctx.score,
                                           "factors": [{"side": f.side, "weight": f.weight, "text": f.text} for f in ctx.factors]}}
             if sc.qqe and shown:
-                # computed on regular-hours candles only, like an RTH chart; the earlier sessions warm it up
-                rth = [b for b in bars if regular(b) and b.t.date() <= shown_day]
-                self.view[sym]["qqe"] = [
-                    {"t": int(rth[s.index].t.timestamp()), "side": s.side, "rsi": round(s.rsi, 1), "line": round(s.line, 1)}
-                    for s in qqe([b.c for b in rth], sc.qqe_rsi_period, sc.qqe_smoothing, sc.qqe_factor)
-                    if rth[s.index].t.date() == shown_day]
+                self.view[sym]["qqe"] = self._qqe([b for b in bars if regular(b)], shown_day)
             if shown_day == day and fbars:
                 # per candle: start time, delta (bought at the offer minus sold at the bid), session CVD
                 self.view[sym]["flow"] = {"feed": self.cfg.orderflow.feed,
@@ -306,6 +307,7 @@ class Scanner:
         self.no_data = missing  # e.g. a mistyped ticker: the page says so instead of waiting
         shown = [o for o in snap.options if not self.only or o.symbol in self.only]
         self.publish(now)
+        self._minutes(now)
         return ScanResult(now, snap.holdings, summaries, found, shown, missing, contexts)
 
     def tick(self, send_alerts: bool = True) -> str:
@@ -347,6 +349,7 @@ class Scanner:
                         crossed.append((lv, "buy" if side > 0 else "sell"))
             w.last = px
             self._form(sym, bar, px)
+            self._form(sym, now.replace(second=0, microsecond=0), px, self.minute_forming)
             vw = next((lv.price for lv in w.levels if lv.name == "VWAP"), None)
             status = f"{now:%H:%M:%S} {sym} {px:.2f}" + (f" ({(px - vw) / vw * 100:+.2f}% vs VWAP)" if vw else "")
             for o in opts:
@@ -387,6 +390,7 @@ class Scanner:
                                  "high" if against else "default",
                                  ["zap", "chart_with_upwards_trend" if side == "buy" else "chart_with_downwards_trend"])
         self.publish(now)
+        self._minutes(now)
         return "\n".join(lines)
 
     def _live_check(self, sym: str, now: datetime, bar: datetime, side: str) -> Check | None:
@@ -402,19 +406,109 @@ class Scanner:
             return None
         return check(bars, bar, side, of.check_bars, of.feed, forming=True)
 
-    def _form(self, sym: str, bar: datetime, px: float) -> None:
+    def _form(self, sym: str, bar: datetime, px: float, into: dict[str, list] | None = None) -> None:
         """The candle still forming, from the live prices seen so far, for the page to draw after the
         completed ones. Built from checks seconds apart, so its high and low can miss a spike between them."""
-        f = self.forming.get(sym)
+        forming = self.forming if into is None else into
+        f = forming.get(sym)
         if f is None or f[0] != bar:
-            self.forming[sym] = [bar, px, px, px, px]
+            forming[sym] = [bar, px, px, px, px]
         else:
             f[2], f[3], f[4] = max(f[2], px), min(f[3], px), px
 
-    def _forming_for(self, sym: str, view: dict) -> list | None:
-        f = self.forming.get(sym)
+    def _forming_for(self, sym: str, view: dict, forming: dict[str, list] | None = None) -> list | None:
+        f = (self.forming if forming is None else forming).get(sym)
         last = view["bars"][-1][0] if view.get("bars") else 0
         return [int(f[0].timestamp()), *f[1:]] if f and int(f[0].timestamp()) > last else None
+
+    def _minutes(self, now: datetime) -> None:
+        """Once a minute, the 1-minute candles closed since the last look (the first time, today's and the
+        two sessions before, which warm up QQE). Only the page's 1m charts use them, no signal does, and a
+        failed fetch costs only them."""
+        sc, step = self.cfg.scan, timedelta(minutes=1)
+        minute = now.replace(second=0, microsecond=0)
+        syms = [s for s in self.view if not self.only or s in self.only]
+        if self.state_path is None or sc.bar_minutes == 1 or not syms:
+            return
+        if minute == self._minute_at and all(s in self.minute for s in syms):
+            return
+        self._minute_at = minute
+        extended = bool({"pre", "post"} & set(sc.sessions))
+        new = [s for s in syms if not self.minute.get(s)]
+        old = [s for s in syms if self.minute.get(s)]
+        for group, start in ((new, weekdays_back(now, 2)),
+                             (old, min((self._minute_ok[s] for s in old), default=now) - 2 * step)):  # a late bar, again
+            if not group:
+                continue
+            try:
+                got = self.source.chart_bars(group, 1, start, extended)
+            except Exception as e:
+                self.journal.log("minute_bars_failed", symbols=group, error=repr(e))
+                for s in group:
+                    self.minute.setdefault(s, {})  # tried: again next minute, not on every check
+                continue
+            for s in group:
+                self._minute_ok[s] = minute
+                rows = self.minute.setdefault(s, {})
+                for b in got.get(s, []):
+                    if b.t + step <= now:
+                        t = b.t.astimezone(now.tzinfo)
+                        rows[t] = Bar(t, b.o, b.h, b.l, b.c, b.v)
+                keep = set(sorted({t.date() for t in rows})[-3:])
+                bars = [rows[t] for t in sorted(rows) if t.date() in keep]
+                self.minute[s] = {b.t: b for b in bars}
+                if bars:
+                    rsi, trend = rsi_and_trend(bars, sc)
+                    self.minute_stats.setdefault(s, {}).update(  # keeps the order flow until it's topped up below
+                        qqe=self._qqe([b for b in bars if regular(b)], bars[-1].t.date()) if sc.qqe else [],
+                        rsi=rsi, trend=trend)
+        self._publish_minutes(now)  # before the tape, which can take a while the first time
+        if self.minute_flow is None:
+            return
+        for s in syms:
+            if not self.minute.get(s) or max(self.minute[s]).date() != now.date():
+                continue  # the tape is today's
+            try:
+                fbars = self.minute_flow.update(s, now).closed(now)
+            except Exception as e:
+                self.journal.log("minute_flow_failed", symbol=s, error=repr(e))
+                continue
+            self.minute_stats[s]["flow"] = {"feed": self.cfg.orderflow.feed, "bars": [
+                [int(b.t.timestamp()), round(b.delta), round(b.cvd)] for b in fbars]} if fbars else None
+        self._publish_minutes(now)
+
+    def _qqe(self, rth: list[Bar], day: date) -> list[dict]:
+        """The QQE signals on `day`, from regular-hours candles only, like an RTH chart; earlier sessions warm it up."""
+        sc = self.cfg.scan
+        return [{"t": int(rth[s.index].t.timestamp()), "side": s.side, "rsi": round(s.rsi, 1), "line": round(s.line, 1)}
+                for s in qqe([b.c for b in rth], sc.qqe_rsi_period, sc.qqe_smoothing, sc.qqe_factor)
+                if rth[s.index].t.date() == day]
+
+    def _publish_minutes(self, now: datetime) -> None:
+        """Write the 1-minute candles for the page's 1m charts."""
+        if self.state_path is None or self.cfg.scan.bar_minutes == 1:
+            return
+        symbols = {}
+        for s, rows in self.minute.items():
+            if not rows or s not in self.view or (self.only and s not in self.only):
+                continue
+            day = max(rows).date()
+            bars = [[int(t.timestamp()), b.o, b.h, b.l, b.c, b.v, 0 if regular(b) else 1]
+                    for t, b in sorted(rows.items()) if t.date() == day]
+            symbols[s] = {"bars": bars, "forming": self._forming_for(s, {"bars": bars}, self.minute_forming),
+                          "qqe": [], "rsi": None, "trend": None, "flow": None} | self.minute_stats.get(s, {})
+        self._write(self.state_path.with_name("scan_chart_1m.json"),
+                    {"updated": now.isoformat(), "bar_minutes": 1, "symbols": symbols})
+
+    def _write(self, path: Path, data: dict) -> None:
+        """Atomically; a failed write never stops the scan."""
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data))
+            os.replace(tmp, path)
+        except OSError:
+            pass
 
     def publish(self, now: datetime) -> None:
         """Write the latest state for the web page (atomically; a failed write never stops the scan)."""
@@ -441,13 +535,8 @@ class Scanner:
                  "tick_seconds": sc.tick_seconds, "sessions": sc.sessions, "session": session_at(now),
                  "only": sorted(self.only) if self.only else None,
                  "symbols": symbols, "no_data": self.no_data, "holdings": rows, "options": opts}
-        try:
-            self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.state_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(state))
-            os.replace(tmp, self.state_path)
-        except OSError:
-            pass
+        self._write(self.state_path, state)
+        self._publish_minutes(now)
 
     def _alert(self, sym: str, group: list[Found]) -> None:
         sides = {f.signal.side for f in group}

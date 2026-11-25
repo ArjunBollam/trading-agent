@@ -18,7 +18,7 @@ import time
 import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Protocol
@@ -100,6 +100,8 @@ class MarketSource(Protocol):
 
     def live(self, account: str, symbols: list[str],
              positions: tuple[list[Holding], list[OptionHolding]] | None = None) -> Live: ...
+
+    def chart_bars(self, symbols: list[str], bar_minutes: int, start: datetime, extended: bool = False) -> dict[str, list[Bar]]: ...
 
 
 def mask(account: str) -> str:
@@ -332,6 +334,25 @@ class RobinhoodMCP:
                         "symbols": wanted[i:i + n], "interval": "day", "start_time": _rfc3339(daily_start)})
                     daily |= parse_bars(data.get("results") or [])
             return Snapshot(holdings, bars, daily, options)
+        return asyncio.run(self._with_client(work))
+
+    def chart_bars(self, symbols: list[str], bar_minutes: int, start: datetime, extended: bool = False) -> dict[str, list[Bar]]:
+        """Just the candles since `start`, for a chart. Read a day at a time, so a reply stays under the size limit."""
+        async def work(call):
+            out: dict[str, list[Bar]] = {s.upper(): [] for s in symbols}
+            names, t, now = list(out), start, datetime.now(start.tzinfo)
+            while t < now:
+                end = min((t + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0), now)  # to midnight
+                if t.weekday() < 5:
+                    n = symbols_per_call(min(960 if extended else 390, int((end - t).total_seconds() // 60) + 1) // bar_minutes)
+                    for i in range(0, len(names), n):
+                        data = await call("get_equity_historicals", {
+                            "symbols": names[i:i + n], "interval": INTERVALS[bar_minutes], "start_time": _rfc3339(t),
+                            "bounds": "extended" if extended else "regular"} | ({"end_time": _rfc3339(end)} if end < now else {}))
+                        for sym, rows in parse_bars(data.get("results") or []).items():
+                            out.setdefault(sym, []).extend(rows)
+                t = end
+            return out
         return asyncio.run(self._with_client(work))
 
     def live(self, account: str, symbols: list[str],

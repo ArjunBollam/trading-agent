@@ -28,12 +28,14 @@ the session's cumulative delta (blue line). The feed on the right explains each 
 - **QQE Long and QQE Short labels.** The QQE signal (a smoothed RSI crossing its volatility line, with the
   same RSI 14 / smoothing 5 / factor 4.238 settings as TradingView's "QQE signals" script) is drawn on
   every chart as its own labels, separate from the scanner's signals. Display only: never alerted or traded.
+- **1-minute and 5-minute charts.** A 1m / 5m switch above the charts changes every chart at once: the
+  candles, RSI, trend, QQE labels and order-flow panel. Signals and alerts stay on the scanner's own candles.
 - **Context-aware phone alerts.** Each signal is checked against the slower trend and key price
   levels, then pushed to your phone, flagged when it goes against a position you hold.
 - **Any LLM, with automatic fallback.** Claude, Grok, Groq, Gemini or OpenRouter. When one model
   hits its rate limit or daily token budget, the next one answers.
 - **Built to be trusted.** Kill switches, a daily loss limit, runaway-order protection, a journal
-  of every decision, order and fill, and 300 tests that run against a fake broker and scripted AI
+  of every decision, order and fill, and 307 tests that run against a fake broker and scripted AI
   replies.
 
 **Tech:** Python 3.13 · LangGraph · Anthropic and OpenAI-compatible APIs · Alpaca API ·

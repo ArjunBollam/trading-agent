@@ -157,6 +157,15 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
     async def state(request: Request) -> Response:
         return JSONResponse(scanner_state(cfg()))
 
+    async def chart(request: Request) -> Response:
+        """The 1-minute candles the live scanner keeps for the page's 1m charts."""
+        if request.query_params.get("minutes", "1") != "1":
+            return error("only 1-minute candles are kept beside the scanner's own")
+        try:
+            return JSONResponse(json.loads((cfg().log_dir / "scan_chart_1m.json").read_text()))
+        except (OSError, ValueError):
+            return JSONResponse({"updated": None, "bar_minutes": 1, "symbols": {}})
+
     def signal_rows(c: Config, day: date) -> list[dict]:
         quiet = set(overrides(c).scan().log_only_patterns)  # for entries written before the journal kept "weak"
         rows = []
@@ -388,6 +397,7 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
         Route("/api/status", status),
         Route("/api/dashboard", dashboard),
         Route("/api/state", state),
+        Route("/api/chart", chart),
         Route("/api/signals", signals),
         Route("/api/dates", dates),
         Route("/api/live-symbols", live_symbols, methods=["GET", "POST"]),
