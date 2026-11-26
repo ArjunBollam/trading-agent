@@ -13,18 +13,27 @@
     <div class="brand">paper<span>bot</span></div>
     <nav id="nav">
       <button data-tab="dashboard" class="active">Dashboard</button>
+      <button data-tab="report">Report<span class="dot" id="report-dot" hidden></span></button>
       <button data-tab="signals">Signals</button>
+      <button data-tab="audit">Audit</button>
       <button data-tab="patterns">Patterns</button>
       <button data-tab="settings">Settings</button>
       <button data-tab="bot">Paper bot</button>
     </nav>
     <div class="pills">
       <span class="pill" id="pill-scanner" title="The live scanner (launchd job com.paperbot.spy-live)">Scanner …</span>
+      <span class="pill" id="pill-audit" title="The signal audit (launchd job com.paperbot.audit)" role="button" tabindex="0">Audit …</span>
       <span class="pill" id="pill-market">Market …</span>
       <span class="pill" id="pill-halt" title="The paper bot's kill switch">Bot …</span>
       <span class="clock" id="clock"></span>
     </div>
   </header>
+
+  <div id="report-alert" class="report-alert" role="status" hidden>
+    <span class="ra-text"></span>
+    <button type="button" id="report-open" class="primary">Read the report</button>
+    <button type="button" id="report-dismiss" class="ghost" title="Dismiss" aria-label="Dismiss">✕</button>
+  </div>
 
   <main>
     <!-- Dashboard -->
@@ -36,9 +45,28 @@
           <input id="add-symbol-input" placeholder="Add symbol, e.g. QQQ" autocomplete="off" spellcheck="false">
           <button type="submit">Add</button>
         </form>
-        <span class="seg" id="tf" role="group" aria-label="Chart candles" title="Candles for every chart, with its RSI, trend, QQE and order flow. Signals and alerts always use the scanner's own candles" hidden><button type="button" data-tf="1">1m</button><button type="button" data-tf="base">5m</button></span>
-        <label class="qqe-toggle" title="QQE Long / QQE Short labels on the charts (RSI 14, smoothing 5, factor 4.238)"><input type="checkbox" id="qqe-on" checked> QQE signals</label>
+        <span class="seg" id="focus-syms" role="group" aria-label="Symbol"></span>
+        <span class="seg" id="tf" role="group" aria-label="Chart candles" title="Candles for every chart, with its RSI, trend, QQE, S/R, squeeze, smart money and order flow. Signals and alerts always use the scanner's own candles" hidden><button type="button" data-tf="1">1m</button><button type="button" data-tf="base">5m</button></span>
+        <label class="overlay-toggle" title="QQE Long / QQE Short labels on the charts (RSI 14, smoothing 5, factor 4.238)"><input type="checkbox" id="qqe-on" checked> QQE signals</label>
+        <label class="overlay-toggle" title="Support (blue) and resistance (red) levels, and candles that break them (15 candles each side, volume threshold 20%)"><input type="checkbox" id="sr-on" checked> S/R Breaks</label>
+        <label class="overlay-toggle" title="When a quiet market (a squeeze) releases, in the direction of momentum (20 candles)"><input type="checkbox" id="sqz-on" checked> Squeeze</label>
+        <label class="overlay-toggle" title="The scanner's own buy and sell arrows"><input type="checkbox" id="arrows-on" checked> Scanner arrows</label>
+        <span class="overlay-group">
+          <label class="overlay-toggle" title="Smart money concepts: market structure, order blocks, equal highs and lows, premium and discount zones"><input type="checkbox" id="smc-on" checked> Smart Money</label>
+          <details id="smc-parts">
+            <summary title="Choose what Smart Money draws">▾</summary>
+            <div class="overlay-menu">
+              <label><input type="checkbox" id="smc-structure-on"> Structure (BOS, CHoCH)</label>
+              <label><input type="checkbox" id="smc-blocks-on"> Order blocks</label>
+              <label><input type="checkbox" id="smc-equal-on"> Equal highs and lows</label>
+              <label><input type="checkbox" id="smc-range-on"> Strong and weak highs and lows</label>
+              <label><input type="checkbox" id="smc-zones-on"> Premium and discount zones</label>
+              <label><input type="checkbox" id="smc-fvg-on"> Fair value gaps</label>
+            </div>
+          </details>
+        </span>
         <span class="muted" id="live-note"></span>
+        <button type="button" id="focus-close" title="Back to all charts (Esc)" aria-label="Back to all charts"><svg viewBox="0 0 18 18" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M6 2v2a2 2 0 0 1-2 2H2M16 6h-2a2 2 0 0 1-2-2V2M12 16v-2a2 2 0 0 1 2-2h2M2 12h2a2 2 0 0 1 2 2v2"/></svg></button>
       </div>
       <div class="dash">
         <div id="cards" class="cards"></div>
@@ -64,6 +92,17 @@
       </div>
     </section>
 
+    <!-- Morning report -->
+    <section id="tab-report" class="tab">
+      <div class="toolbar">
+        <select id="rep-pick"></select>
+        <button type="button" id="rep-now" title="Works the levels out again from the chart as it is now">Make a new one now</button>
+        <button type="button" id="rep-notify" class="ghost" hidden>Turn on desktop alerts</button>
+        <span class="muted" id="rep-note"></span>
+      </div>
+      <div id="rep-body" class="rep"></div>
+    </section>
+
     <!-- Signals history -->
     <section id="tab-signals" class="tab">
       <div class="toolbar">
@@ -77,6 +116,32 @@
       </div>
       <div class="panel"><div id="sig-kinds" class="kinds"></div></div>
       <div class="panel table-wrap"><table id="sig-table" class="grid"></table></div>
+    </section>
+
+    <!-- Audit -->
+    <section id="tab-audit" class="tab">
+      <div class="toolbar">
+        <select id="aud-date"></select>
+        <select id="aud-symbol"><option value="">All symbols</option></select>
+        <select id="aud-source"><option value="">Every signal</option></select>
+        <select id="aud-verdict">
+          <option value="problems">Problems only</option>
+          <option value="">All results</option>
+          <option value="ok">Right</option>
+          <option value="wrong">Wrong</option>
+          <option value="missed">Missed</option>
+          <option value="wording">Wording only</option>
+          <option value="changed">Candle corrected</option>
+          <option value="differs">Close call</option>
+        </select>
+        <span class="muted" id="aud-note"></span>
+      </div>
+      <div class="panel"><div id="aud-tiles" class="aud-tiles"></div></div>
+      <div class="panel table-wrap">
+        <div class="panel-head"><h3>By indicator</h3><span class="muted small">Right means it was worked out correctly. "Went its way" is what price did after 30 minutes, beside any candle that day.</span></div>
+        <table id="aud-groups" class="grid"></table>
+      </div>
+      <div class="panel table-wrap"><table id="aud-table" class="grid"></table></div>
     </section>
 
     <!-- Patterns -->

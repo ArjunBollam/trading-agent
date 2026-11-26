@@ -136,6 +136,110 @@ def robinhood_command(args, config_path: Path) -> int:
     return 0
 
 
+def audit_command(args, config_path: Path) -> int:
+    """`audit`: checks every signal (signal_audit.py). Reads only, with the sign-in the live scan keeps."""
+    import os
+    from datetime import datetime, timedelta
+
+    from .app import flow_tracker
+    from .config import load_dotenv
+    from .journal import Journal
+    from .notify import Alerts, build_channel
+    from .overrides import Overrides
+    from .robinhood import RobinhoodMCP
+    from .scanner import weekdays_back
+    from .signal_audit import AlpacaBars, Audit, Candles, SECOND_AFTER, report, watch
+
+    load_dotenv(config_path.parent / ".env")
+    cfg = Config.load(config_path)
+    tz = cfg.schedule.tz
+    try:
+        rh = RobinhoodMCP(os.environ.get("ROBINHOOD_MCP_URL", ""), cfg.scan.oauth_callback_port, borrow=True)
+        full = AlpacaBars(os.environ.get("ALPACA_API_KEY", ""), os.environ.get("ALPACA_SECRET_KEY", ""))
+    except ValueError as e:
+        print(f"paperbot: {e}", file=sys.stderr)
+        return 2
+
+    def now():
+        return datetime.now(tz)
+
+    def second(symbols, minutes, start, extended):
+        return full.bars(symbols, minutes, start, now() - SECOND_AFTER)
+
+    def daily(symbols, at):
+        snap = rh.snapshot(os.environ.get("ROBINHOOD_ACCOUNT_NUMBER", ""), symbols, cfg.scan.bar_minutes, weekdays_back(at, 0),
+                           at - timedelta(days=400), extended=False)
+        return {s: [b.__class__(b.t.astimezone(tz), b.o, b.h, b.l, b.c, b.v) for b in rows] for s, rows in snap.daily.items()}
+
+    journal = Journal(cfg.log_dir, now)
+    alerts = Alerts(build_channel(cfg.alerts, cfg.log_dir), cfg.alerts, journal, now)
+    audit = Audit(cfg, Overrides(cfg.log_dir / "settings.json", cfg.scan).scan, Candles(rh.chart_bars), Candles(second),
+                  flow_tracker(cfg, cfg.scan.bar_minutes), journal, now, daily,
+                  alert=(lambda title, text: alerts.send(title, text, "default", ["mag"])) if args.live and not args.no_alerts else None)
+    try:
+        if not args.live:
+            audit.cycle()
+            print(report(audit))
+            return 0
+        print("Auditing every signal, once a minute. Ctrl-C to stop.", flush=True)
+        watch(audit, lambda text: print(text, flush=True))
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
+def outlook_command(args, config_path: Path) -> int:
+    """`outlook`: the key support, what could happen above and below it, and why (outlook.py). Reads only."""
+    import os
+    from datetime import datetime, timedelta
+
+    from . import outlook
+    from .config import load_dotenv
+    from .robinhood import RobinhoodError, RobinhoodMCP
+    from .signal_audit import SECOND_AFTER, AlpacaBars
+
+    load_dotenv(config_path.parent / ".env")
+    cfg = Config.load(config_path)
+    tz = cfg.schedule.tz
+    try:
+        rh = RobinhoodMCP(os.environ.get("ROBINHOOD_MCP_URL", ""), cfg.scan.oauth_callback_port, borrow=True)
+        full = AlpacaBars(os.environ.get("ALPACA_API_KEY", ""), os.environ.get("ALPACA_SECRET_KEY", ""))
+    except ValueError as e:
+        print(f"paperbot: {e}", file=sys.stderr)
+        return 2
+    now = datetime.now(tz)
+    at = datetime.fromisoformat(args.at).replace(tzinfo=tz) if args.at else now.replace(second=0, microsecond=0)
+    folder, made = cfg.log_dir / "reports", 0
+    for sym in [s.strip().upper() for s in args.symbols.split(",") if s.strip()] or cfg.daily_report.symbols:
+        def market(minutes, start, end, sym=sym):
+            return full.bars([sym], minutes, start, min(end, now - SECOND_AFTER), "split").get(sym, [])
+
+        def night(start, end, sym=sym):
+            return rh.long_bars(sym, 30, start, end)
+
+        def latest(start, sym=sym):
+            return rh.chart_bars([sym], 5, start, True).get(sym, [])
+
+        try:
+            bars = outlook.gather(at, market, night, None if args.at else latest)
+        except RobinhoodError as e:
+            print(f"paperbot: {e}", file=sys.stderr)
+            return 1
+        if args.morning and not outlook.traded_today(bars, at):
+            print(f"{sym}: no trading today, so no report")
+            continue
+        report = outlook.build(sym, bars, at)
+        if report is None:
+            print(f"{sym}: not enough candles for a report")
+            continue
+        data = outlook.to_json(report, bars)
+        outlook.finish(folder, sym, bars, at.date())
+        outlook.save(folder, data, "morning" if args.morning else "now")
+        made += 1
+        print(outlook.as_text(data))
+    return 0 if made else 3
+
+
 def orderflow_command(args, config_path: Path) -> int:
     """A past session's order-flow signals and what happened after each, from Alpaca's trade tape."""
     import os
@@ -300,6 +404,13 @@ def main(argv: list[str] | None = None) -> int:
     scan.add_argument("--tick", type=int, metavar="SECONDS",
                       help="with --live, also check the live price every SECONDS between bar closes and alert "
                            "level crosses inside the forming bar (overrides scan.tick_seconds)")
+    aud = sub.add_parser("audit", help="check today's signals: is each right, does a second source agree, what came next (read-only)")
+    aud.add_argument("--live", action="store_true", help="keep checking, once a minute, and alert your phone about a wrong one")
+    aud.add_argument("--no-alerts", action="store_true", help="with --live: don't alert your phone")
+    rep = sub.add_parser("outlook", help="the morning report: the key support, the bullish and bearish scenarios, and why (read-only)")
+    rep.add_argument("--symbols", default="", help="e.g. SPY,QQQ (default: daily_report.symbols in config.yaml)")
+    rep.add_argument("--morning", action="store_true", help="save it as the day's morning report; nothing on a day without trading")
+    rep.add_argument("--at", default="", help="as it would have been at this New York time, e.g. 2026-11-25T11:00")
     sub.add_parser("robinhood-login", help="sign in to Robinhood's MCP server and list your accounts")
     live = sub.add_parser("live-symbols", help="list or change the live scan's symbols; a running scan follows at once")
     live.add_argument("action", nargs="?", default="list", choices=["list", "add", "remove", "set", "reset"],
@@ -366,6 +477,10 @@ def main(argv: list[str] | None = None) -> int:
         return live_symbols_command(args, config_path)
     if args.command == "orderflow":
         return orderflow_command(args, config_path)
+    if args.command == "outlook":
+        return outlook_command(args, config_path)
+    if args.command == "audit":
+        return audit_command(args, config_path)
     if args.command == "patterns":
         return patterns_command(args, config_path)
     if args.command == "web":

@@ -64,6 +64,7 @@ def five_minute_bars(closes: list[float], extended: bool = False) -> list[Bar]:
 
 def test_the_scanner_shows_todays_qqe_signals_on_regular_candles_only(cfg):
     closes = walk(3, 156)
+    cfg.scan.chart_sessions = 0
     clock = [at(TODAY, 78) + timedelta(seconds=10)]
     views = []
     for ext in (False, True):

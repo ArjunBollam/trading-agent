@@ -285,7 +285,35 @@ class ScanConfig(BaseModel):
     qqe_rsi_period: int = Field(14, ge=2, description="QQE: RSI length, in candles")
     qqe_smoothing: int = Field(5, ge=1, description="QQE: RSI smoothing, in candles")
     qqe_factor: float = Field(4.238, gt=0, description="QQE: how far the trailing line sits from the smoothed RSI")
+    # overlays.py: support and resistance breaks and squeeze releases, for looking at only, like QQE.
+    sr_breaks: bool = Field(True, description="Draw support / resistance levels and their breaks on the charts (shown only)")
+    sr_pivot_bars: int = Field(15, ge=2, description="S/R breaks: candles on each side of a pivot high or low")
+    sr_volume: float = Field(20.0, description="S/R breaks: how far (%) the fast volume average must be above the slow one")
+    squeeze: bool = Field(True, description="Draw squeeze releases on the charts (shown only)")
+    squeeze_length: int = Field(20, ge=5, description="Squeeze: candles in the bands, channels and momentum")
+    squeeze_bb_mult: float = Field(1.5, gt=0, description=(
+        "Squeeze: Bollinger Band width. 1.5 matches the script as published on TradingView; its author's fix is 2.0"))
+    squeeze_kc_mult: float = Field(1.5, gt=0, description="Squeeze: Keltner Channel width")
+    # smc.py: market structure, order blocks and the rest, for looking at only, like the overlays above.
+    smc: bool = Field(True, description="Draw smart money concepts on the charts (shown only)")
+    smc_swing: int = Field(50, ge=10, description="Smart money: candles that confirm a swing high or low")
+    smc_blocks: int = Field(5, ge=0, le=20, description="Smart money: internal order blocks drawn, newest first")
+    smc_swing_blocks: int = Field(0, ge=0, le=20, description="Smart money: swing order blocks drawn, newest first")
+    chart_sessions: int = Field(3, ge=0, le=10, description="Earlier sessions the charts show, on the scanner's own candles")
+    history_sessions: int = Field(10, ge=2, le=30, description=(
+        "Earlier sessions the charts' overlays are worked out from, on the scanner's own candles"))
     oauth_callback_port: int = Field(33418, ge=1024, le=65535, description="Local port for the Robinhood sign-in redirect")
+
+
+class DailyReportConfig(BaseModel):
+    """The morning report (outlook.py): the key support, what could happen above and below it, and why. The web page makes
+    it once each trading day and shows an alert. Information only."""
+
+    enabled: bool = True
+    symbols: list[str] = Field(["SPY"], min_length=1)
+    at: time = time(10, 0)  # in `timezone`
+    until: time = time(15, 0)  # a morning missed (the computer was off) is still made up to then
+    timezone: str = "America/Chicago"
 
 
 class OrderFlowConfig(BaseModel):
@@ -325,6 +353,7 @@ class Config(BaseModel):
     alerts: AlertConfig = AlertConfig()
     scan: ScanConfig = ScanConfig()
     orderflow: OrderFlowConfig = OrderFlowConfig()
+    daily_report: DailyReportConfig = DailyReportConfig()
     strategy: str
 
     @model_validator(mode="after")

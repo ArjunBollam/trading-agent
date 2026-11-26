@@ -176,6 +176,9 @@ scan:                             # `paperbot scan`: read-only chart signals on 
   forming_near_atr: 0.5           # warn of a head and shoulders / double / triple top or bottom still forming
                                   # once price closes this close (in ATRs) to its neckline
   qqe: true                       # QQE Long / QQE Short labels on the charts (shown only, never alerted)
+  sr_breaks: true                 # support / resistance levels and their breaks (shown only)
+  squeeze: true                   # squeeze releases (shown only)
+  smc: true                       # smart money concepts: structure, order blocks, zones (shown only)
 
   # The bigger picture: every signal is checked against the last few hours and a slower candle
   # (patterns that broke and still hold, ones still forming, lower highs / higher lows, trend, RSI, VWAP).

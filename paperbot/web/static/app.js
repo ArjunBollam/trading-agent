@@ -16,6 +16,9 @@ const tone = (x) => (x == null || x === 0 ? "" : x > 0 ? "up" : "down");
 const etTime = (d, seconds = false) =>
   d.toLocaleTimeString("en-US", { timeZone: ET, hour: "2-digit", minute: "2-digit", second: seconds ? "2-digit" : undefined, hour12: false });
 const hm = (iso) => (iso ? etTime(new Date(iso)) : "");
+const etDate = (t) => new Date(t * 1000).toLocaleDateString("en-US", { timeZone: ET });
+// a candle's time, with its day when that isn't today's
+const when = (t) => (etDate(t) === etDate(Date.now() / 1000) ? "" : etDay(new Date(t * 1000)) + " ") + etTime(new Date(t * 1000));
 const etDay = (d) => d.toLocaleDateString("en-US", { timeZone: ET, weekday: "short" });
 const SESSION_NAMES = { pre: "pre-market", regular: "regular hours", post: "after hours" };
 
@@ -104,11 +107,22 @@ function signalTipHtml(s) {
     s.against === true ? "against your position" : s.against === false && s.held ? "with your position" : "",
     s.conflict ? "against the bigger picture" : "",
   ].filter(Boolean);
-  const flow = s.flow ? `<div class="tip-detail flow-${esc(s.flow)}">${esc(s.flow_detail || "Order flow " + s.flow)}</div>` : "";
+  // on a 1-minute chart, say plainly that it's about the scanner's own candle, and show that candle's prices
+  const base = lastState?.bar_minutes;
+  const start = Math.floor(new Date(s.time).getTime() / 1000);
+  const own = oneMinute() && !s.live ? lastState.symbols?.[s.symbol]?.bars?.find((b) => b[0] === start) : null;
+  const span = oneMinute() && !s.live;
+  const time = span ? `${base}-minute candle ${hm(s.time)}–${etTime(new Date((start + base * 60) * 1000))} · closed ${num(s.price)}` : `${hm(s.time)} · ${num(s.price)}`;
+  const ohlc = own ? `<div class="tip-ohlc">That candle: O ${num(own[1])} · H ${num(own[2])} · L ${num(own[3])} · C ${num(own[4])}</div>` : "";
+  let flowText = s.flow_detail || "Order flow " + s.flow;
+  if (span) flowText = flowText.replace("on this candle", `on that ${base}-minute candle`).replace(/over the last (\d+) candles/, `over the last $1 ${base}-minute candles`);
+  const flow = s.flow ? `<div class="tip-detail flow-${esc(s.flow)}">${esc(flowText)}</div>` : "";
   return `<div class="tip-sig ${s.side}">
-    <div class="tip-title">${sideBadge(s.side)}<b>${esc(s.label)}</b><span class="muted">${hm(s.time)} · ${num(s.price)}</span></div>
+    <div class="tip-title">${sideBadge(s.side)}<b>${esc(s.label)}</b><span class="muted">${time}</span></div>
+    ${ohlc}
     ${s.detail ? `<div class="tip-detail">${esc(s.detail)}</div>` : ""}
     ${flow}
+    ${auditHtml(s.live ? `live|${s.symbol}|${s.level}|${s.side}|${s.ts}` : `scan|${s.symbol}|${s.kind}|${s.level || ""}|${s.time}`)}
     ${flags.length ? `<div class="tip-flags">${flags.map((f) => `<span class="tag">${esc(f)}</span>`).join("")}</div>` : ""}
     ${explainHtml(s.kind)}</div>`;
 }
@@ -125,16 +139,19 @@ function chartTip(card, param) {
   let html = "";
   if (bar) {
     const chg = bar.open ? ((bar.close - bar.open) / bar.open) * 100 : null;
-    html += `<div class="tip-head"><b>${esc(card.el.dataset.sym)}</b><span>${etTime(new Date(param.time * 1000))} candle</span>` +
+    html += `<div class="tip-head"><b>${esc(card.el.dataset.sym)}</b><span>${when(param.time)} candle</span>` +
       `<span class="${tone(chg)}">${chg == null ? "" : (chg >= 0 ? "+" : "") + chg.toFixed(2) + "%"}</span></div>` +
       `<div class="tip-ohlc">O ${num(bar.open)} · H ${num(bar.high)} · L ${num(bar.low)} · C ${num(bar.close)}${vol ? ` · Vol ${fmtVol(vol.value)}` : ""}</div>`;
     const fb = card.flowAt?.get(param.time);
-    const qq = showQqe ? card.qqeAt?.get(param.time) : null;
-    if (qq) html += `<div class="tip-ohlc"><b class="qqe-tag ${qq.side}">${QQE_STYLE[qq.side].name}</b> ${esc(qqeText(qq))}</div>`;
+    for (const o of card.overlaysAt?.get(param.time) || []) {
+      html += `<div class="tip-ohlc"><b class="overlay-tag" style="background:${o.color}">${esc(o.name)}</b> ${esc(o.text)}</div>` +
+        (o.source ? auditHtml(`${oneMinute() ? 1 : lastState?.bar_minutes}|${card.el.dataset.sym}|${o.source}|${o.kind}|${o.side}|${o.t}`) : "");
+    }
     if (fb) html += `<div class="tip-ohlc">Order flow: delta <b class="${tone(fb[1])}">${fmtSigned(fb[1])}</b> · CVD <b class="${tone(fb[2])}">${fmtSigned(fb[2])}</b></div>`;
   }
   const shown = sigs.slice(0, 3);
   html += shown.map(signalTipHtml).join("");
+  if (card.el.classList.contains("expanded") && !sigs.length && !card.overlaysAt?.get(param.time)) return hideTip(); // the legend has the prices
   if (sigs.length > shown.length) html += `<div class="tip-more muted">+${sigs.length - shown.length} more on this candle, listed under Signals today</div>`;
   else if (!sigs.length) html += `<div class="tip-more muted">No signal on this candle.</div>`;
   tipEl.innerHTML = html;
@@ -165,10 +182,13 @@ function effectTag(s) {
 
 const loaders = {};
 function showTab(name) {
-  if (!$(`#tab-${name}`)) name = "dashboard";
+  const alone = /^chart\/(.+)$/.exec(name);
+  setFocus(alone ? decodeURIComponent(alone[1]).toUpperCase() : null);
+  if (alone || !$(`#tab-${name}`)) name = "dashboard";
   $$("#nav button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   $$(".tab").forEach((t) => t.classList.toggle("active", t.id === `tab-${name}`));
-  if (location.hash !== `#${name}`) history.replaceState(null, "", `#${name}`);
+  const hash = focusSym ? `#chart/${encodeURIComponent(focusSym)}` : `#${name}`;
+  if (location.hash !== hash) history.replaceState(null, "", hash);
   loaders[name]?.();
   schedulePoll(name === "dashboard" ? POLL_MS : OVERVIEW_POLL_MS);
 }
@@ -193,6 +213,8 @@ function renderPills(ov) {
   const pm = $("#pill-market");
   pm.textContent = { pre: "Pre-market", regular: "Market open", post: "After hours" }[ov.session] || "Market closed";
   pm.className = "pill " + (ov.session === "regular" ? "ok" : ov.session ? "warn" : "");
+  renderAuditPill(ov.audit);
+  renderReportAlert(ov.report);
   const h = ov.halts;
   const halted = h.all || h.manual || h.day;
   const ph = $("#pill-halt");
@@ -206,9 +228,18 @@ setInterval(() => ($("#clock").textContent = etTime(new Date(), true) + " ET"), 
 const cards = {}; // symbol -> { el, chart, candles, volume, levelLines, liveLine, keys }
 let seen = null; // signal ids already shown, so new ones flash
 let lastSignals = [];
-const QQE_STYLE = { long: { color: "#1f9d55", name: "QQE Long" }, short: { color: "#e5484d", name: "QQE Short" } };
-let showQqe = true;
-try { showQqe = localStorage.getItem("qqe") !== "off"; } catch { /* no storage: shown */ }
+const showOverlay = { qqe: true, sr: true, sqz: true, smc: true, arrows: true }; // which of the overlays are drawn: the boxes above the charts
+const showSmc = { structure: true, blocks: true, equal: true, range: true, zones: true, fvg: false }; // the parts of Smart Money
+for (const id of Object.keys(showOverlay)) {
+  try { showOverlay[id] = localStorage.getItem(id) !== "off"; } catch { /* no storage: shown */ }
+}
+for (const id of Object.keys(showSmc)) {
+  try {
+    const saved = localStorage.getItem(`smc-${id}`);
+    if (saved) showSmc[id] = saved === "on";
+  } catch { /* no storage: the defaults */ }
+}
+let focusSym = null; // the symbol shown alone, filling the page (#chart/SPY)
 let chartTf = "base"; // the charts' candles: "1" for 1 minute, "base" for the scanner's own (5 minutes)
 try { if (localStorage.getItem("tf") === "1") chartTf = "1"; } catch { /* no storage: the scanner's own */ }
 let lastChart = null; // the 1-minute candles, fetched only while they're shown
@@ -286,12 +317,12 @@ async function refreshDashboard() {
 
 const oneMinute = () => chartTf === "1" && lastState?.bar_minutes !== 1;
 
-// what a card shows: the scanner's own candles, or the 1-minute ones, each with its own RSI, trend, QQE and order flow
+// what a card shows: the scanner's own candles, or the 1-minute ones, each with its own RSI, trend, overlays and order flow
 // (VWAP, the levels and the bigger picture don't depend on the candles shown)
 function chartView(sym, v) {
   if (!v || !oneMinute()) return v;
   const c = lastChart?.symbols?.[sym];
-  return { ...v, bars: c?.bars || [], forming: c?.forming || null, qqe: c?.qqe || [], flow: c?.flow || null,
+  return { ...v, earlier: [], bars: c?.bars || [], forming: c?.forming || null, qqe: c?.qqe || [], sr: c?.sr || null, sqz: c?.sqz || null, smc: c?.smc || null, flow: c?.flow || null,
     rsi: c?.rsi ?? null, trend: c?.trend ?? null, waiting: !c };
 }
 
@@ -335,11 +366,19 @@ function renderChips() {
     (liveInfo.source === "file" && liveInfo.by ? ` · list changed by ${liveInfo.by}` : "");
 }
 
-$("#qqe-on").checked = showQqe;
-$("#qqe-on").addEventListener("change", (e) => {
-  showQqe = e.target.checked;
-  try { localStorage.setItem("qqe", showQqe ? "on" : "off"); } catch { /* no storage: this page view only */ }
-  if (lastState) renderCards();
+for (const [group, prefix] of [[showOverlay, ""], [showSmc, "smc-"]]) {
+  for (const id of Object.keys(group)) {
+    const box = $(`#${prefix}${id}-on`);
+    box.checked = group[id];
+    box.addEventListener("change", () => {
+      group[id] = box.checked;
+      try { localStorage.setItem(prefix + id, box.checked ? "on" : "off"); } catch { /* no storage: this page view only */ }
+      if (lastState) renderCards();
+    });
+  }
+}
+document.addEventListener("click", (e) => { // the parts menu closes on a click anywhere else
+  if (!e.target.closest("#smc-parts")) $("#smc-parts").open = false;
 });
 $("#chips").addEventListener("click", async (e) => {
   const sym = e.target.dataset.remove;
@@ -385,13 +424,17 @@ function makeCard(sym) {
   el.className = "card";
   el.dataset.sym = sym;
   el.innerHTML = `
+    <button type="button" class="expand" title="Show only ${esc(sym)}, full page" aria-label="Show only ${esc(sym)}, full page">${EXPAND_ICON}</button>
     <div class="card-head">
-      <span class="sym">${esc(sym)}</span><span class="px num">–</span>
+      <span class="sym" title="Show only ${esc(sym)}, full page">${esc(sym)}</span><span class="px num">–</span>
       <span class="stat">vs VWAP <b class="vw">–</b></span>
       <span class="stat">RSI <i class="tf-tag"></i> <b class="rsi">–</b></span>
       <span class="stat">trend <i class="tf-tag"></i> <b class="trend">–</b></span>
       <span class="stat ctx" hidden>bigger picture <b class="bias">–</b></span>
-      <span class="stat qqe" hidden>QQE <i class="tf-tag"></i> <b class="qv"></b></span>
+      <span class="stat qqe" hidden>QQE <i class="tf-tag"></i> <b></b></span>
+      <span class="stat sr" hidden>S/R <i class="tf-tag"></i> <b></b></span>
+      <span class="stat sqz" hidden>squeeze <i class="tf-tag"></i> <b></b></span>
+      <span class="stat smc" hidden>smart money <i class="tf-tag"></i> <b></b></span>
       <span class="stat muted bar"></span>
     </div>
     <div class="chart"></div>
@@ -399,9 +442,19 @@ function makeCard(sym) {
       <div class="flow-legend"></div>
       <div class="flow-chart"></div>
     </div>
-    <div class="card-foot"><span class="hold muted"></span><span class="levels"></span></div>`;
+    <div class="card-foot">
+      <span class="ranges">${["1H", "2H", "Today", "All"].map((r) => `<button type="button" data-range="${r}">${r}</button>`).join("")}</span>
+      <span class="hold muted"></span><span class="levels"></span><span class="foot-clock"></span>
+    </div>`;
   const card = { el, keys: {}, levelLines: [] };
   const box = $(".chart", el);
+  card.legend = document.createElement("div");
+  card.legend.className = "legend";
+  box.append(card.legend);
+  $(".expand", el).addEventListener("click", () => openFocus(sym));
+  $(".sym", el).addEventListener("click", () => openFocus(sym));
+  $(".ranges", el).addEventListener("click", (e) => e.target.dataset.range && showRange(card, e.target.dataset.range));
+  el.classList.toggle("expanded", sym === focusSym);
   card.box = box;
   card.loading = document.createElement("div");
   card.loading.className = "chart-loading";
@@ -412,19 +465,66 @@ function makeCard(sym) {
   return card;
 }
 
-/* ---------- QQE Long / QQE Short (paperbot/qqe.py): labels on the price chart, apart from the scanner's own markers ---------- */
+/* ---------- overlays: QQE, support / resistance breaks, squeeze releases (paperbot/qqe.py, overlays.py).
+   Labels on the price chart, apart from the scanner's own markers ---------- */
 
-class QqeLabels {
+class ChartLabels {
   constructor() {
-    this.items = []; // { t, price, side, room }: room is the space a scanner marker already takes there
-    const view = { zOrder: () => "top", renderer: () => ({ draw: (target) => this.draw(target) }) };
-    this.views = [view];
+    this.items = []; // { t, price, below, name, color, room }: room is the space other things already take there
+    this.lines = []; // { from, to, price, color, dash, text, above, width }: lines under the candles; no `to`: to the right edge
+    this.boxes = []; // { from, to, top, bottom, fill, border, text, color }: zones under the candles
+    const view = (zOrder, draw) => ({ zOrder: () => zOrder, renderer: () => ({ draw }) });
+    this.views = [view("bottom", (target) => this.drawLines(target)), view("top", (target) => this.draw(target))];
   }
   attached({ chart, series, requestUpdate }) { this.chart = chart; this.series = series; this.requestUpdate = requestUpdate; }
   detached() { this.chart = this.series = this.requestUpdate = null; }
   updateAllViews() {}
   paneViews() { return this.views; }
-  set(items) { this.items = items; this.requestUpdate?.(); }
+  set(items, lines, boxes) { this.items = items; this.lines = lines; this.boxes = boxes; this.requestUpdate?.(); }
+  drawLines(target) {
+    if (!this.chart) return;
+    target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
+      const ts = this.chart.timeScale();
+      const x = (t, missing) => (t == null ? missing : ts.timeToCoordinate(t));
+      const y = (p) => this.series.priceToCoordinate(p);
+      ctx.font = "600 9px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+      ctx.textBaseline = "middle";
+      for (const b of this.boxes) {
+        const x1 = x(b.from, 0), x2 = x(b.to, mediaSize.width), y1 = y(b.top), y2 = y(b.bottom);
+        if (x1 == null || x2 == null || y1 == null || y2 == null || x2 < 0) continue;
+        const left = Math.max(x1, 0), h = Math.max(y2 - y1, 1);
+        ctx.fillStyle = b.fill;
+        ctx.fillRect(left, y1, x2 - left, h);
+        if (b.border) {
+          ctx.strokeStyle = b.border;
+          ctx.lineWidth = 1;
+          ctx.strokeRect(left, y1, x2 - left, h);
+        }
+        if (b.text) {
+          ctx.fillStyle = b.color;
+          ctx.textAlign = "right";
+          ctx.fillText(b.text, x2 - 6, y1 + h / 2);
+        }
+      }
+      for (const l of this.lines) {
+        const x1 = x(l.from, 0), x2 = x(l.to, mediaSize.width), y1 = y(l.price), y2 = l.price2 == null ? y1 : y(l.price2);
+        if (x1 == null || x2 == null || y1 == null || y2 == null) continue;
+        ctx.strokeStyle = l.color;
+        ctx.lineWidth = l.width || 2;
+        ctx.setLineDash(l.dash || []);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        if (l.text) {
+          ctx.fillStyle = l.color;
+          ctx.textAlign = l.to == null ? "right" : "center";
+          ctx.fillText(l.text, l.to == null ? x2 - 6 : (x1 + x2) / 2, (l.above ? Math.min(y1, y2) - 7 : Math.max(y1, y2) + 8));
+        }
+      }
+    });
+  }
   draw(target) {
     if (!this.chart) return;
     target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
@@ -432,72 +532,231 @@ class QqeLabels {
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       const ts = this.chart.timeScale();
+      const placed = []; // the labels drawn so far, so the next one moves out of their way
       for (const q of this.items) {
         const x = ts.timeToCoordinate(q.t);
         const y = this.series.priceToCoordinate(q.price);
-        if (x == null || y == null) continue;
-        const { color, name } = QQE_STYLE[q.side];
-        const w = ctx.measureText(name).width + 12, h = 16, tip = 4;
-        const below = q.side === "long";
+        if (x == null || y == null || x < -60 || x > mediaSize.width + 60) continue;
+        const w = ctx.measureText(q.name).width + 12, h = 16, tip = 4;
         // below the candle for a long, above it for a short, with the pointer toward the candle
-        const tipY = below ? y + 3 + q.room : y - 3 - q.room;
-        let top = below ? tipY + tip : tipY - tip - h;
+        const tipY = q.below ? y + 3 + q.room : y - 3 - q.room;
+        let top = q.below ? tipY + tip : tipY - tip - h;
+        const clashes = () => placed.some((r) => x - w / 2 < r.x + r.w + 2 && r.x < x + w / 2 + 2 && top < r.y + h + 2 && r.y < top + h + 2);
+        for (let i = 0; i < 8 && clashes(); i++) top += q.below ? h + 3 : -(h + 3);
         top = Math.max(1, Math.min(mediaSize.height - h - 1, top));
-        ctx.fillStyle = color;
+        placed.push({ x: x - w / 2, y: top, w });
+        ctx.fillStyle = ctx.strokeStyle = q.color;
+        ctx.lineWidth = 1;
+        ctx.beginPath(); // from a label that moved, a thin line back to its candle
+        ctx.moveTo(x, tipY);
+        ctx.lineTo(x, q.below ? top : top + h);
+        ctx.stroke();
         ctx.beginPath();
         ctx.roundRect(x - w / 2, top, w, h, 3);
         ctx.fill();
         ctx.beginPath();
-        if (below) { ctx.moveTo(x, tipY); ctx.lineTo(x - 5, top + 1); ctx.lineTo(x + 5, top + 1); }
-        else { ctx.moveTo(x, tipY); ctx.lineTo(x - 5, top + h - 1); ctx.lineTo(x + 5, top + h - 1); }
+        if (q.below) { ctx.moveTo(x, top - tip); ctx.lineTo(x - 5, top + 1); ctx.lineTo(x + 5, top + 1); }
+        else { ctx.moveTo(x, top + h + tip); ctx.lineTo(x - 5, top + h - 1); ctx.lineTo(x + 5, top + h - 1); }
         ctx.fill();
         ctx.fillStyle = "#fff";
-        ctx.fillText(name, x, top + h / 2 + 0.5);
+        ctx.fillText(q.name, x, top + h / 2 + 0.5);
       }
     });
   }
 }
 
-function qqeText(q) {
-  return `${q.side === "long" ? "Smoothed RSI " + num(q.rsi, 1) + " crossed above" : "Smoothed RSI " + num(q.rsi, 1) + " crossed below"} its QQE line ${num(q.line, 1)}.`;
+const EXPAND_ICON = `<svg viewBox="0 0 18 18" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+  <path d="M2 6V4a2 2 0 0 1 2-2h2M12 2h2a2 2 0 0 1 2 2v2M16 12v2a2 2 0 0 1-2 2h-2M6 16H4a2 2 0 0 1-2-2v-2"/></svg>`;
+
+const LABEL_HEIGHT = 22; // a second label on the same candle goes this much further out
+const GAP_COLOR = "#5b6473"; // a label that comes from the overnight gap, not from a move in the session
+
+// one overlay's signals as [{ t, side, name, color, text }], oldest first
+const OVERLAYS = {
+  qqe: {
+    signals: (v) => (v.qqe || []).map((q) => ({ t: q.t, side: q.side, source: "qqe", kind: "", name: q.side === "long" ? "QQE Long" : "QQE Short",
+      color: q.side === "long" ? "#1f9d55" : "#e5484d",
+      text: `Smoothed RSI ${num(q.rsi, 1)} crossed ${q.side === "long" ? "above" : "below"} its QQE line ${num(q.line, 1)}.` +
+        (q.gap ? " It's the first candle after a big overnight gap, so the gap is part of it." : "") })),
+    stat: (last) => last && `${last.side === "long" ? "Long" : "Short"} ${when(last.t)}`,
+  },
+  sr: {
+    signals: (v) => (v.sr?.breaks || []).map((b) => {
+      const up = b.side === "long";
+      if (b.gap) {
+        return { t: b.t, side: b.side, source: "sr", kind: b.kind, gap: true, name: up ? "S/R Gap Up" : "S/R Gap Down", color: GAP_COLOR,
+          text: `Opened at ${num(b.open)}, already ${up ? "above resistance" : "below support"} ${num(b.level)}: the overnight gap broke it, not this candle.` };
+      }
+      return { t: b.t, side: b.side, source: "sr", kind: b.kind, name: b.kind === "wick" ? (up ? "S/R Bull Wick" : "S/R Bear Wick") : up ? "S/R Break Up" : "S/R Break Down",
+        color: up ? "#0e8f8f" : "#c2680c",
+        text: `Closed ${up ? "above resistance" : "below support"} ${num(b.level)}` + (b.kind === "wick"
+          ? ` with a long ${up ? "lower" : "upper"} wick (volume ${b.vol >= 0 ? "+" : ""}${b.vol}%).` : ` on rising volume (+${b.vol}%).`) };
+    }),
+    stat: (last) => last && `${last.name.slice(4)} ${when(last.t)}`,
+  },
+  sqz: {
+    signals: (v) => (v.sqz?.signals || []).map((x) => ({ t: x.t, side: x.side, source: "sqz", kind: "", gap: x.gap,
+      name: `SQZ ${x.gap ? "Gap " : ""}${x.side === "long" ? "Long" : "Short"}`,
+      color: x.gap ? GAP_COLOR : x.side === "long" ? "#6d4fd8" : "#c43a8e",
+      text: `The squeeze released after ${x.candles} candle${x.candles === 1 ? "" : "s"}, with momentum ${x.mom > 0 ? "up" : "down"} (${x.mom > 0 ? "+" : ""}${x.mom}).` +
+        (x.gap ? " It's the first candle after a big overnight gap, so the gap caused it." : "") })),
+    stat: (last, v) => (v.sqz?.on ? `on, ${v.sqz.on} candle${v.sqz.on === 1 ? "" : "s"}` : last && `${last.name.slice(4)} ${when(last.t)}`),
+  },
+};
+
+/* ---------- smart money concepts (paperbot/smc.py) ---------- */
+
+const SMC = { up: "#14a085", down: "#e8505b" };
+const smcName = (x) => `${x.internal ? "internal" : "swing"} ${x.kind} ${x.side === "long" ? "up" : "down"}${x.gap ? " (overnight gap)" : ""}`;
+const biasName = (b) => (b > 0 ? "bullish" : b < 0 ? "bearish" : "–");
+
+// what a candle's tooltip says about market structure
+function smcNotes(v) {
+  const m = showOverlay.smc ? v.smc : null;
+  const out = [];
+  if (m && showSmc.structure) {
+    for (const x of m.structure) {
+      const up = x.side === "long";
+      out.push({ t: x.t, side: x.side, source: "smc", kind: `${x.internal ? "internal" : "swing"} ${x.kind}`, name: `SMC ${smcName(x)}`, color: x.gap ? GAP_COLOR : up ? SMC.up : SMC.down,
+        text: `Closed ${up ? "above" : "below"} the ${x.internal ? "internal" : "swing"} ${up ? "high" : "low"} ${num(x.level)}: ` +
+          (x.kind === "BOS" ? "the trend goes on." : "the trend may be turning.") + (x.gap ? " It opened past the level, so the overnight gap did it." : "") });
+    }
+  }
+  if (m && showSmc.equal) {
+    for (const x of m.equal) {
+      out.push({ t: x.known, name: x.side === "high" ? "SMC equal highs" : "SMC equal lows", color: x.side === "high" ? SMC.down : SMC.up,
+        text: `${num(x.levels[0])} and ${num(x.levels[1])}, confirmed on this candle: stops often rest ${x.side === "high" ? "above" : "below"} them.` });
+    }
+  }
+  return out;
 }
 
-function updateQqe(card, v, bars) {
-  const qqe = showQqe ? v.qqe || [] : [];
-  const last = (v.qqe || []).at(-1);
-  const stat = $(".qqe", card.el);
-  stat.hidden = !last || !showQqe;
-  if (last && showQqe) {
-    const b = $(".qv", card.el);
-    b.textContent = `${last.side === "long" ? "Long" : "Short"} ${etTime(new Date(last.t * 1000))}`;
-    b.className = "qv " + (last.side === "long" ? "up" : "down");
-    stat.title = `Latest QQE signal: ${qqeText(last)}`;
+function updateSmc(card, v) {
+  const m = showOverlay.smc ? v.smc : null;
+  const stat = $(".stat.smc", card.el);
+  stat.hidden = !m;
+  if (!m) return;
+  const b = $("b", stat);
+  b.innerHTML = `swing <span class="${tone(m.swing)}">${biasName(m.swing)}</span>, internal <span class="${tone(m.internal)}">${biasName(m.internal)}</span>`;
+  const last = m.structure.at(-1);
+  stat.title = last ? `Latest: ${smcName(last)} at ${when(last.t)}, through ${num(last.level)}` : "No structure break on this chart";
+}
+
+// its lines and boxes, starting no earlier than the chart does
+function smcShapes(v, bars) {
+  const m = showOverlay.smc ? v.smc : null;
+  if (!m || !bars.length) return { lines: [], boxes: [] };
+  const first = bars[0][0];
+  const from = (t) => (t < first ? null : t);
+  const lines = [], boxes = [];
+  const r = m.range;
+  if (r && showSmc.zones) {
+    const zone = (name, fill, color) => r.zones[name] && boxes.push({ from: from(r.from), top: r.zones[name][0], bottom: r.zones[name][1], fill, color,
+      text: name[0].toUpperCase() + name.slice(1) });
+    zone("premium", "rgba(232,80,91,.13)", "#e8808a");
+    zone("equilibrium", "rgba(140,150,165,.13)", "#8a93a3");
+    zone("discount", "rgba(20,160,133,.13)", "#4fc0a8");
   }
-  if (!card.chart) return;
-  if (!card.qqeLabels) {
-    card.qqeLabels = new QqeLabels();
-    card.candles.attachPrimitive(card.qqeLabels);
+  if (showSmc.blocks) {
+    for (const b of m.blocks) {
+      const up = b.side === "long";
+      boxes.push({ from: from(b.from), top: b.top, bottom: b.bottom, color: up ? "#7ea6f5" : "#f0a0a4",
+        fill: up ? `rgba(49,121,245,${b.internal ? 0.18 : 0.28})` : `rgba(247,124,128,${b.internal ? 0.18 : 0.28})`,
+        border: up ? "rgba(49,121,245,.45)" : "rgba(247,124,128,.45)" });
+    }
   }
-  const key = JSON.stringify(qqe) + "|" + card.keys.bars + "|" + card.keys.markers;
-  if (key === card.keys.qqe) return;
-  card.keys.qqe = key;
+  if (showSmc.fvg) {
+    const at = new Map(bars.map((b, i) => [b[0], i]));
+    for (const g of m.fvg) {
+      const i = at.get(g.from);
+      if (i != null) boxes.push({ from: g.from, to: bars[Math.min(i + 2, bars.length - 1)][0], top: g.top, bottom: g.bottom,
+        fill: g.side === "long" ? "rgba(0,230,118,.28)" : "rgba(255,60,70,.28)" });
+    }
+  }
+  if (showSmc.structure) {
+    for (const x of m.structure) {
+      const up = x.side === "long";
+      lines.push({ from: from(x.from), to: x.t, price: x.level, color: x.gap ? GAP_COLOR : up ? SMC.up : SMC.down, width: 1,
+        dash: x.internal ? [4, 3] : null, text: x.internal ? x.kind : `${x.kind} (swing)`, above: up });
+    }
+  }
+  if (showSmc.equal) {
+    for (const x of m.equal) {
+      lines.push({ from: from(x.from), to: x.t, price: x.levels[0], price2: x.levels[1], color: x.side === "high" ? SMC.down : SMC.up, width: 1,
+        dash: [1, 2], text: x.side === "high" ? "EQH" : "EQL", above: x.side === "high" });
+    }
+  }
+  if (r && showSmc.range) {
+    lines.push({ from: from(r.topFrom), price: r.top, color: SMC.down, width: 1, text: m.swing < 0 ? "Strong High" : "Weak High", above: true });
+    lines.push({ from: from(r.bottomFrom), price: r.bottom, color: SMC.up, width: 1, text: m.swing > 0 ? "Strong Low" : "Weak Low", above: false });
+  }
+  return { lines, boxes };
+}
+
+function updateOverlays(card, v, bars) {
   const byTime = new Map(bars.map((b) => [b[0], b]));
-  card.qqeAt = new Map(qqe.map((q) => [q.t, q]));
-  card.qqeLabels.set(qqe.filter((q) => byTime.has(q.t)).map((q) => ({
-    t: q.t, side: q.side, price: byTime.get(q.t)[q.side === "long" ? 3 : 2],
-    room: card.markedAt?.has(`${q.t}|${q.side === "long" ? "buy" : "sell"}`) ? 28 : 2,
-  })));
+  const shown = [];
+  for (const [id, o] of Object.entries(OVERLAYS)) {
+    const signals = o.signals(v);
+    const last = signals.at(-1);
+    const text = showOverlay[id] && o.stat(last, v);
+    const stat = $(`.stat.${id}`, card.el);
+    stat.hidden = !text;
+    if (text) {
+      const b = $("b", stat);
+      b.textContent = text;
+      b.className = (id === "sqz" && v.sqz?.on) || last.gap ? "" : last.side === "long" ? "up" : "down";
+      stat.title = id === "sqz" && v.sqz?.on ? "A quiet market: the Bollinger Bands are inside the Keltner Channels" : last.text;
+    }
+    if (showOverlay[id]) shown.push(...signals.filter((s) => byTime.has(s.t)));
+  }
+  updateSmc(card, v);
+  if (!card.chart) return;
+  if (!card.labels) {
+    card.labels = new ChartLabels();
+    card.candles.attachPrimitive(card.labels);
+  }
+  const levels = showOverlay.sr ? v.sr?.levels || [] : [];
+  const smc = smcShapes(v, bars);
+  const key = JSON.stringify([shown.map((s) => [s.t, s.name]), levels, smc]) + "|" + card.keys.bars + "|" + card.keys.markers;
+  if (key === card.keys.overlays) return;
+  card.keys.overlays = key;
+  card.overlaysAt = new Map(); // candle time -> its overlay signals, for the tooltip
+  const used = new Map(); // how far out the labels on a candle's side already reach
+  const labels = shown.sort((a, b) => a.t - b.t).map((s) => {
+    const below = s.side === "long";
+    const at = `${s.t}|${below ? "buy" : "sell"}`;
+    const room = used.get(at) ?? (card.markedAt?.has(at) ? 28 : 2);
+    used.set(at, room + LABEL_HEIGHT);
+    card.overlaysAt.set(s.t, [...(card.overlaysAt.get(s.t) || []), s]);
+    return { t: s.t, price: byTime.get(s.t)[below ? 3 : 2], below, name: s.name, color: s.color, room };
+  });
+  for (const x of smcNotes(v)) card.overlaysAt.set(x.t, [...(card.overlaysAt.get(x.t) || []), x]);
+  // resistance (red) and support (blue), each from the candle it was known on until the next one
+  const lines = [];
+  for (const [k, color] of [[1, "rgba(239,68,68,.75)"], [2, "rgba(59,130,246,.8)"]]) {
+    const at = levels.filter((l) => byTime.has(l[0]));
+    at.forEach((l, i) => {
+      if (l[k] == null || (i && at[i - 1][k] === l[k])) return; // carried on from the previous one
+      const next = at.slice(i + 1).find((m) => m[k] !== l[k]);
+      const to = next ? bars[bars.findIndex((b) => b[0] === next[0]) - 1]?.[0] : bars.length ? bars[bars.length - 1][0] : null;
+      if (to != null) lines.push({ from: l[0], to, price: l[k], color });
+    });
+  }
+  card.labels.set(labels, [...smc.lines, ...lines], smc.boxes);
 }
 
 function initializeChart(card) {
   const box = $(".chart", card.el);
-  const fmt = (t) => etTime(new Date(t * 1000));
+  const fmt = (t) => when(t);
+  const tick = (t, type) => (type < 3 // a new day
+    ? new Date(t * 1000).toLocaleDateString("en-US", { timeZone: ET, month: "short", day: "numeric" }) : etTime(new Date(t * 1000)));
   card.chart = LightweightCharts.createChart(box, {
     autoSize: true,
     layout: { background: { type: "solid", color: "#12161d" }, textColor: "#8a93a3", fontSize: 11 },
     grid: { vertLines: { color: "#1a2029" }, horzLines: { color: "#1a2029" } },
     rightPriceScale: { borderColor: "#232a36", minimumWidth: 84 },
-    timeScale: { borderColor: "#232a36", timeVisible: true, secondsVisible: false, rightOffset: 4, tickMarkFormatter: fmt },
+    timeScale: { borderColor: "#232a36", timeVisible: true, secondsVisible: false, rightOffset: 4, tickMarkFormatter: tick },
     localization: { timeFormatter: fmt },
     crosshair: { mode: 0 },
   });
@@ -507,10 +766,132 @@ function initializeChart(card) {
   card.candles.priceScale().applyOptions({ scaleMargins: { top: 0.08, bottom: 0.22 } });
   card.volume = card.chart.addHistogramSeries({ priceScaleId: "", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false });
   card.volume.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
-  card.chart.subscribeCrosshairMove((param) => chartTip(card, param));
-  box.addEventListener("mouseleave", hideTip);
+  card.chart.subscribeCrosshairMove((param) => {
+    card.hover = param.point && param.time != null ? param.time : null;
+    updateLegend(card);
+    chartTip(card, param);
+  });
+  box.addEventListener("mouseleave", () => { card.hover = null; hideTip(); updateLegend(card); });
   initializeFlowChart(card);
+  styleCard(card);
 }
+
+/* ---------- one chart, full page (#chart/SPY) ---------- */
+
+const CANDLES = { // the dashboard's colours, and the full page's
+  card: { up: "#22c55e", down: "#ef4444", upFaint: "34,197,94", downFaint: "239,68,68" },
+  page: { up: "#089981", down: "#f23645", upFaint: "8,153,129", downFaint: "242,54,69" },
+};
+const palette = (card) => (card.el.classList.contains("expanded") ? CANDLES.page : CANDLES.card);
+
+function styleCard(card) {
+  if (!card.chart) return;
+  const page = card.el.classList.contains("expanded");
+  const c = palette(card);
+  const grid = page ? { color: "rgba(255,255,255,.07)", style: 1 } : { color: "#1a2029", style: 0 };
+  const base = { background: { type: "solid", color: page ? "#0f0f0f" : "#12161d" }, textColor: page ? "#c9ccd3" : "#8a93a3" };
+  const border = page ? "#2e2e2e" : "#232a36";
+  card.chart.applyOptions({ layout: { ...base, fontSize: page ? 12 : 11 }, grid: { vertLines: grid, horzLines: grid },
+    rightPriceScale: { borderColor: border }, timeScale: { borderColor: border, rightOffset: page ? 12 : 4 } });
+  card.flowChart.applyOptions({ layout: base, grid: { vertLines: grid }, rightPriceScale: { borderColor: border }, timeScale: { rightOffset: page ? 12 : 4 } });
+  // the full page's live line already labels the price, with the candle's countdown
+  card.candles.applyOptions({ upColor: c.up, downColor: c.down, wickUpColor: c.up, wickDownColor: c.down, lastValueVisible: !page, priceLineVisible: !page });
+  card.candles.priceScale().applyOptions({ scaleMargins: page ? { top: 0.2, bottom: 0.18 } : { top: 0.08, bottom: 0.22 } });
+}
+
+function openFocus(sym) {
+  location.hash = focusSym === sym ? "dashboard" : `chart/${encodeURIComponent(sym)}`; // a hash change, so Back closes it
+}
+
+function setFocus(sym) {
+  if (sym === focusSym) return;
+  focusSym = sym;
+  hideTip();
+  document.body.classList.toggle("focus", !!sym);
+  document.title = sym ? `${sym} · paperbot` : "paperbot";
+  if (!sym) window.scrollTo(0, 0);
+  for (const [s, card] of Object.entries(cards)) {
+    card.el.classList.toggle("expanded", s === sym);
+    if (s === sym) loadCardChart(card);
+    restyle(card);
+  }
+  if (lastState) {
+    renderFocusBar();
+    renderCards();
+  }
+}
+
+// its colours and size changed: draw it again, at the zoom that suits its new width
+function restyle(card) {
+  if (!card.chart) return;
+  styleCard(card);
+  card.keys = { levels: card.keys.levels };
+  card.fitted = false;
+}
+
+// the symbols to switch between, while one is shown alone
+function renderFocusBar() {
+  const el = $("#focus-syms");
+  const syms = focusSym ? Object.keys(cards) : [];
+  const key = syms.join(",") + "|" + focusSym;
+  if (el.dataset.key === key) return;
+  el.dataset.key = key;
+  el.innerHTML = syms.map((s) => `<button type="button" data-sym="${esc(s)}" class="${s === focusSym ? "on" : ""}">${esc(s)}</button>`).join("");
+}
+$("#focus-syms").addEventListener("click", (e) => e.target.dataset.sym && e.target.dataset.sym !== focusSym && openFocus(e.target.dataset.sym));
+$("#focus-close").addEventListener("click", () => (location.hash = "dashboard"));
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && focusSym) location.hash = "dashboard"; });
+
+function showRange(card, range) {
+  const bars = card.drawn || [];
+  if (!card.chart || !bars.length) return;
+  const minutes = card.tf === "1" ? 1 : lastState.bar_minutes;
+  const ts = card.chart.timeScale();
+  if (range === "All") return ts.fitContent();
+  let from = bars.length - (range === "2H" ? 120 : 60) / minutes;
+  if (range === "Today") {
+    const day = etDate(bars[bars.length - 1][0]);
+    const open = bars.findIndex((b) => etDate(b[0]) === day && !b[6]);
+    from = open >= 0 ? open : bars.findIndex((b) => etDate(b[0]) === day);
+  }
+  ts.setVisibleLogicalRange({ from: Math.max(0, from), to: bars.length + (range === "Today" ? 6 : 3) });
+}
+
+// top left of a full-page chart: the candle's prices, then each indicator's latest reading
+function updateLegend(card) {
+  if (!card.el.classList.contains("expanded") || !card.drawn?.length) { card.legend.innerHTML = ""; return; }
+  const at = card.hover != null ? card.drawn.findIndex((b) => b[0] === card.hover) : -1;
+  const i = at >= 0 ? at : card.drawn.length - 1;
+  const b = card.drawn[i];
+  const prev = card.drawn[i - 1];
+  const chg = prev ? b[4] - prev[4] : b[4] - b[1];
+  const tn = b[4] >= b[1] ? "lg-up" : "lg-down";
+  const val = (x) => `<span class="${tn}">${num(x)}</span>`;
+  const sign = chg >= 0 ? "+" : "−";
+  const pctText = ((Math.abs(chg) / (prev ? prev[4] : b[1])) * 100).toFixed(2);
+  const rows = [["qqe", "QQE signals"], ["sr", "S/R Breaks"], ["sqz", "Squeeze"], ["smc", "Smart Money"]]
+    .map(([id, name]) => [name, $(`.stat.${id}`, card.el)]).filter(([, el]) => !el.hidden)
+    .map(([name, el]) => `<div class="lg-row">${name} <span>${$("b", el).innerHTML ? `<b class="${$("b", el).className}">${$("b", el).innerHTML}</b>` : ""}</span></div>`).join("");
+  const minutes = card.tf === "1" ? 1 : lastState.bar_minutes;
+  card.legend.innerHTML = `
+    <div class="lg-main"><b>${esc(card.el.dataset.sym)}</b> <span class="lg-dot">·</span> ${minutes}m
+      <span class="lg-ohlc">O ${val(b[1])} H ${val(b[2])} L ${val(b[3])} C ${val(b[4])} <span class="${tn}">${sign}${Math.abs(chg).toFixed(2)} (${sign}${pctText}%)</span>
+      ${b[5] != null ? `Vol <span class="${tn}">${fmtVol(b[5])}</span>` : ""}</span></div>
+    <div class="lg-row">${when(b[0])} <span>RSI <b>${$(".rsi", card.el).textContent}</b> · vs VWAP <b class="${$(".vw", card.el).className.replace("vw", "").trim()}">${$(".vw", card.el).textContent}</b> · trend <b class="${$(".trend", card.el).className.replace("trend", "").trim()}">${$(".trend", card.el).textContent}</b>${$(".ctx", card.el).hidden ? "" : ` · bigger picture <b class="${$(".bias", card.el).className.replace("bias", "").trim()}">${$(".bias", card.el).textContent}</b>`}</span></div>
+    ${rows}`;
+}
+
+// once a second: the full page's clock, and the time left in the forming candle on its price label
+setInterval(() => {
+  const card = focusSym && cards[focusSym];
+  if (!card) return;
+  $(".foot-clock", card.el).textContent = etTime(new Date(), true) + " ET";
+  if (!card.liveLine || !lastState) return;
+  const secs = (card.tf === "1" ? 1 : lastState.bar_minutes) * 60;
+  const left = secs - (Math.floor(Date.now() / 1000) % secs);
+  const open = lastState.session && lastState.status === "running";
+  card.liveLine.applyOptions({ title: open ? `${String(Math.floor(left / 60)).padStart(2, "0")}:${String(left % 60).padStart(2, "0")}` : "live" });
+}, 1000);
 
 // Order flow under the price chart: each candle's delta (green bars: more shares bought at the offer
 // than sold at the bid) and the session's cumulative delta (blue line). It has a slot for every
@@ -609,12 +990,17 @@ function renderCards() {
     if (root.children[i] !== card.el) root.insertBefore(card.el, root.children[i] || null);
     updateCard(card, sym, st.symbols?.[sym]);
   });
+  if (focusSym && !cards[focusSym]) location.hash = "dashboard"; // it isn't on the list
+  else if (focusSym) {
+    if (!cards[focusSym].chart) loadCardChart(cards[focusSym]);
+    renderFocusBar();
+  }
 }
 
 // pre-market and after-hours candles are drawn faded, as on most charts
-function extColors(up, extended) {
+function extColors(up, extended, pal = CANDLES.card) {
   if (!extended) return {};
-  const c = up ? "rgba(34,197,94,.4)" : "rgba(239,68,68,.4)";
+  const c = `rgba(${up ? pal.upFaint : pal.downFaint},.4)`;
   return { color: c, wickColor: c, borderColor: c };
 }
 
@@ -636,7 +1022,7 @@ function updateCard(card, sym, v) {
   const vs = px != null && v.vwap ? ((px - v.vwap) / v.vwap) * 100 : null;
   $(".vw", el).textContent = vs == null ? "–" : (vs >= 0 ? "+" : "") + vs.toFixed(2) + "%";
   $(".vw", el).className = "vw " + tone(vs);
-  const cv = chartView(sym, v); // what the chart, the RSI, the trend, QQE and the order flow show
+  const cv = chartView(sym, v); // what the chart, the RSI, the trend, the overlays and the order flow show
   const tf = oneMinute() ? "1" : "base";
   const tfName = `${tf === "1" ? 1 : lastState.bar_minutes}m`;
   for (const tag of $$(".tf-tag", el)) tag.textContent = tfName;
@@ -676,17 +1062,21 @@ function updateCard(card, sym, v) {
     card.keys = { levels: card.keys.levels };
     card.fitted = false;
   }
-  const bars = cv.bars || [];
+  const bars = [...(cv.earlier || []), ...(cv.bars || [])]; // the sessions before today's, then today's
   const barKey = bars.length ? `${bars.length}|${bars[bars.length - 1][0]}|${bars[bars.length - 1][4]}` : "";
   if (barKey !== card.keys.bars) {
     card.keys.bars = barKey;
-    card.candles.setData(bars.map((b) => ({ time: b[0], open: b[1], high: b[2], low: b[3], close: b[4], ...extColors(b[4] >= b[1], b[6]) })));
-    card.volume.setData(bars.map((b) => ({ time: b[0], value: b[5], color: b[4] >= b[1] ? `rgba(34,197,94,${b[6] ? 0.15 : 0.35})` : `rgba(239,68,68,${b[6] ? 0.15 : 0.35})` })));
+    const pal = palette(card);
+    card.candles.setData(bars.map((b) => ({ time: b[0], open: b[1], high: b[2], low: b[3], close: b[4], ...extColors(b[4] >= b[1], b[6], pal) })));
+    card.volume.setData(bars.map((b) => ({ time: b[0], value: b[5], color: `rgba(${b[4] >= b[1] ? pal.upFaint : pal.downFaint},${b[6] ? 0.15 : 0.35})` })));
     if (!card.fitted && bars.length) {
       card.fitted = true;
       setTimeout(() => { // once autoSize has given the chart its width
         const ts = card.chart.timeScale();
-        if (card.tf === "1" && bars.length > 150) ts.setVisibleLogicalRange({ from: bars.length - 120, to: bars.length + 4 }); // the last 2 hours
+        // the last 2 hours, or today and the afternoon before (more on a full page): scroll left for the rest
+        const page = card.el.classList.contains("expanded");
+        const n = (card.tf === "1" ? 120 : 150) + (page ? 60 : 0);
+        if (bars.length > n + 10) ts.setVisibleLogicalRange({ from: bars.length - n, to: bars.length + (page ? 12 : 4) });
         else ts.fitContent();
       }, 300);
     }
@@ -695,18 +1085,19 @@ function updateCard(card, sym, v) {
   const f = cv.forming;
   if (f && (!bars.length || f[0] > bars[bars.length - 1][0])) {
     card.candles.update({ time: f[0], open: f[1], high: f[2], low: f[3], close: f[4],
-      ...extColors(f[4] >= f[1], lastState.session && lastState.session !== "regular") });
+      ...extColors(f[4] >= f[1], lastState.session && lastState.session !== "regular", palette(card)) });
   }
+  card.drawn = f && (!bars.length || f[0] > bars[bars.length - 1][0]) ? [...bars, [f[0], f[1], f[2], f[3], f[4], null, 0]] : bars;
   const times = bars.map((b) => b[0]);
   if (f && (!times.length || f[0] > times[times.length - 1])) times.push(f[0]);
   updateFlow(card, cv, times);
   // signal markers, snapped to the candle they belong to
-  const mkKey = lastSignals.filter((s) => s.symbol === sym).map(signalId).join(",") + barKey;
+  const mkKey = lastSignals.filter((s) => s.symbol === sym).map(signalId).join(",") + barKey + showOverlay.arrows;
   if (mkKey !== card.keys.markers) {
     card.keys.markers = mkKey;
     const times = bars.map((b) => b[0]);
     const snap = (t) => { let best = times[0]; for (const x of times) if (x <= t) best = x; return best; };
-    const sigs = lastSignals.filter((s) => s.symbol === sym && times.length);
+    const sigs = showOverlay.arrows ? lastSignals.filter((s) => s.symbol === sym && times.length) : [];
     // one marker per candle and side; only the latest few carry a label, so the chart stays readable
     const groups = new Map();
     for (const s of sigs) {
@@ -720,14 +1111,15 @@ function updateCard(card, sym, v) {
       groups.set(k, g);
     }
     const list = [...groups.values()].sort((a, b) => a.time - b.time);
-    card.markedAt = new Set(list.map((g) => `${g.time}|${g.side}`)); // so the QQE labels leave room for these markers
+    card.markedAt = new Set(list.map((g) => `${g.time}|${g.side}`)); // so the overlay labels leave room for these markers
     card.sigsAt = new Map(); // candle time -> its signals, for the hover tooltip
     for (const g of list) card.sigsAt.set(g.time, [...(card.sigsAt.get(g.time) || []), ...g.all]);
     const labelled = new Set(list.filter((g) => g.strong.length).slice(-6));
     const markers = list.map((g) => {
       const buy = g.side === "buy";
       const lead = g.strong[0] || g.all[0];
-      const name = lead.live ? "live" : lead.label.length > 16 ? lead.label.slice(0, 15) + "…" : lead.label;
+      const own = tf === "1" && !lead.live ? `${lastState.bar_minutes}m ` : ""; // from the scanner's own candle, not this minute's
+      const name = own + (lead.live ? "live" : lead.label.length > 16 ? lead.label.slice(0, 15) + "…" : lead.label);
       return {
         id: `${g.time}|${g.side}`,
         time: g.time,
@@ -740,7 +1132,7 @@ function updateCard(card, sym, v) {
     });
     card.candles.setMarkers(markers);
   }
-  updateQqe(card, cv, bars);
+  updateOverlays(card, cv, bars);
   // levels as price lines
   const lvKey = JSON.stringify(v.levels || []);
   if (lvKey !== card.keys.levels) {
@@ -760,7 +1152,12 @@ function updateCard(card, sym, v) {
     } else {
       card.liveLine.applyOptions({ price: px });
     }
+    const last = card.drawn[card.drawn.length - 1];
+    const pal = palette(card);
+    const page = card.el.classList.contains("expanded");
+    card.liveLine.applyOptions(page && last ? { color: last[4] >= last[1] ? pal.up : pal.down } : { color: "#e6e9ef", title: "live" });
   }
+  updateLegend(card);
 }
 
 function renderPositions() {
@@ -865,6 +1262,212 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
+/* ---------- the morning report (paperbot/outlook.py) ---------- */
+
+let reportList = [];
+let report = null; // the one shown
+let reportChart = null;
+let reportToday = null; // today's morning report, for the alert
+let reportTimer = null;
+
+const ctTime = (iso) => new Date(iso).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" }) + " CT";
+const repDate = (iso) => new Date(iso).toLocaleDateString("en-US", { timeZone: ET, weekday: "short", month: "short", day: "numeric" });
+const remember = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private window */ } };
+const recall = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+
+// once a day: a bar across the page, a dot on the tab, and a desktop alert if they're on
+function renderReportAlert(r) {
+  reportToday = r || null;
+  const unread = Boolean(r) && recall("reportSeen") !== r.id;
+  if (unread && activeTab() === "report" && report?.id === r.id) return markReportRead();
+  $("#report-dot").hidden = !unread;
+  $("#report-alert").hidden = !unread;
+  const title = document.title.replace(/^● /, "");
+  document.title = (unread ? "● " : "") + title;
+  if (!unread) return;
+  $("#report-alert .ra-text").innerHTML = `<b>Today's ${esc(r.symbol)} report is ready.</b> ${esc(r.title)} · ${esc(ctTime(r.at))}`;
+  if (recall("reportNotified") !== r.id && "Notification" in window && Notification.permission === "granted") {
+    remember("reportNotified", r.id);
+    const n = new Notification(`${r.symbol} morning report`, { body: r.title, tag: r.id });
+    n.onclick = () => { window.focus(); openReport(r.id); n.close(); };
+  }
+}
+function markReportRead() {
+  if (reportToday) remember("reportSeen", reportToday.id);
+  renderReportAlert(reportToday);
+}
+function openReport(id) {
+  report = null;
+  if (id) $("#rep-pick").dataset.want = id;
+  if (activeTab() === "report") loaders.report();
+  else showTab("report");
+}
+$("#report-open").addEventListener("click", () => openReport(reportToday?.id));
+$("#report-dismiss").addEventListener("click", markReportRead);
+setInterval(() => { // the alert, with the page in the background
+  if (document.hidden) api("/api/status").then((ov) => renderReportAlert(ov.report)).catch(() => {});
+}, 60000);
+
+function renderNotifyButton() {
+  $("#rep-notify").hidden = !("Notification" in window) || Notification.permission !== "default";
+}
+$("#rep-notify").addEventListener("click", () => Notification.requestPermission().then(renderNotifyButton));
+
+loaders.report = async () => {
+  renderNotifyButton();
+  reportList = (await api("/api/reports")).reports;
+  const pick = $("#rep-pick");
+  const want = pick.dataset.want || pick.value || reportToday?.id || reportList[0]?.id;
+  delete pick.dataset.want;
+  pick.innerHTML = reportList.map((r) => `<option value="${esc(r.id)}"${r.id === want ? " selected" : ""}>${esc(repDate(r.at))}, ${esc(ctTime(r.at))} · ${esc(r.symbol)}${r.kind === "morning" ? "" : " (made on request)"}</option>`).join("");
+  pick.hidden = !reportList.length;
+  if (!reportList.length) {
+    $("#rep-body").innerHTML = `<div class="empty">The first report comes at 10:00 AM Central on the next trading day. "Make a new one now" makes one at once.</div>`;
+    return;
+  }
+  await loadReport(pick.value);
+};
+async function loadReport(id) {
+  const r = await api(`/api/reports/${encodeURIComponent(id)}`);
+  const same = report?.id === r.id;
+  report = r;
+  if (reportToday && r.id === reportToday.id) markReportRead();
+  if (same) renderReportOutcome();
+  else renderReport();
+  clearInterval(reportTimer);
+  reportTimer = setInterval(() => { // what price has done since, while the report is open
+    if (activeTab() !== "report" || document.hidden || report?.day !== reportDay()) return;
+    api(`/api/reports/${encodeURIComponent(report.id)}`).then((x) => {
+      if (x.id !== report.id) return;
+      report = x;
+      renderReportOutcome();
+    }).catch(() => {});
+  }, 30000);
+}
+const reportDay = () => new Date().toLocaleDateString("en-CA", { timeZone: ET });
+$("#rep-pick").addEventListener("change", () => loadReport($("#rep-pick").value));
+$("#rep-now").addEventListener("click", async () => {
+  const b = $("#rep-now");
+  b.disabled = true;
+  $("#rep-note").textContent = "Working out the levels, about 15 seconds…";
+  try {
+    const out = await api("/api/commands/outlook", { method: "POST" });
+    $("#rep-note").textContent = out.code === 0 ? "" : "It couldn't be made: " + out.output.trim().split("\n").pop();
+    if (out.code === 0) {
+      $("#rep-pick").dataset.want = (await api("/api/reports")).reports[0].id;
+      await loaders.report();
+    }
+  } catch (e) {
+    $("#rep-note").textContent = e.message;
+  }
+  b.disabled = false;
+});
+
+const levelText = (x) => (x.low === x.high ? num(x.low) : `${num(x.low)} – ${num(x.high)}`);
+
+function renderReport() {
+  const r = report;
+  const bias = { buyers: ["Buyers ahead", "up"], sellers: ["Sellers ahead", "down"], mixed: ["Neither side ahead", ""] }[r.bias];
+  const rows = (list) => list.map((x) => `<li data-level="${esc(x.what)}"><span class="lv">${levelText(x)}</span><span class="what">${esc(x.what)}<i class="hit"></i></span>
+    <small>${esc(x.why.join(" · "))}</small></li>`).join("") || `<li class="muted">Nothing on the chart within reach.</li>`;
+  $("#rep-body").innerHTML = `
+    <article class="rep-text panel">
+      <h2>${esc(r.title)}</h2>
+      <p class="muted">4-hour chart, levels and outlook · ${esc(repDate(r.at))}, ${esc(ctTime(r.at))} (${etTime(new Date(r.at))} ET) · price then ${num(r.price)} · <span class="${bias[1]}">${bias[0]}</span></p>
+      <div id="rep-live" class="rep-live"></div>
+      <h3>What's happening</h3>
+      <ul class="plain">${r.facts.map((f) => `<li>${esc(f)}</li>`).join("")}</ul>
+      <h3 class="bull"><i></i>Bullish scenario</h3>
+      <p>${esc(r.bull.text)}</p>
+      <ul class="rep-levels bull">${rows(r.bull.levels)}</ul>
+      <h3 class="bear"><i></i>Bearish scenario</h3>
+      <p>${esc(r.bear.text)}</p>
+      <ul class="rep-levels bear">${rows(r.bear.levels)}</ul>
+      <h3>The support level: ${num(r.key.price)}</h3>
+      <ul class="plain">${r.support.map((f) => `<li>${esc(f)}</li>`).join("")}</ul>
+      <h3>Overall outlook</h3>
+      ${r.outlook.map((f) => `<p>${esc(f)}</p>`).join("")}
+      <p class="muted small">Scenarios read off the chart, not a prediction and not advice. On 244 past SPY mornings the key level bounced 54% of the times price touched it;
+        a level picked at a random distance, 50%. Dates and hours in the text are New York time.</p>
+    </article>
+    <div class="rep-chart panel">
+      <div class="rep-legend"><b>${esc(r.symbol)}</b> 4h · 180 days, around the clock
+        <span style="color:#f1f1e6">20 EMA</span><span style="color:#f23645">50 EMA</span><span style="color:#3aa655">200 SMA</span>
+        <span style="color:#a64bd6">falling line</span><span style="color:#4aa8ff">rising line</span></div>
+      <div class="rep-canvas"><div class="chart-loading">Loading the chart…</div></div>
+    </div>`;
+  renderReportOutcome();
+  drawReportChart();
+}
+
+// whether the support has held, and the targets reached
+function renderReportOutcome() {
+  const o = report?.outcome, el = $("#rep-live");
+  if (!o || !el) return;
+  const key = num(report.key.price), at = (iso) => (iso ? etTime(new Date(iso)) + " ET" : "");
+  const line = {
+    waiting: ["", `Support ${key}: no candles since the report yet.`],
+    holding: ["ok", `✓ Support ${key} has held since the report. Lowest since: ${num(o.low)}.`],
+    lost: ["bad", `✗ Support ${key} was lost: a half-hour candle closed below it at ${at(o.lost_at)}. Lowest since: ${num(o.low)}.`],
+    reclaimed: ["warn", `Support ${key} was lost at ${at(o.lost_at)}, then won back at ${at(o.reclaimed_at)}. Lowest since: ${num(o.low)}.`],
+  }[o.status];
+  el.className = "rep-live " + line[0];
+  el.textContent = line[1] + (o.last != null ? ` Highest ${num(o.high)}, last ${num(o.last)}.` : "");
+  $$("#rep-body [data-level]").forEach((li) => {
+    const hit = o.hit.find((h) => h.what === li.dataset.level);
+    $(".hit", li).textContent = hit ? ` ✓ reached ${at(hit.at)}` : "";
+  });
+}
+
+function drawReportChart() {
+  const r = report, box = $(".rep-canvas");
+  loadChartLibrary().then(() => {
+    if (report?.id !== r.id || !box.isConnected) return;
+    reportChart?.remove();
+    box.innerHTML = "";
+    const bars = r.chart.bars;
+    const tick = (t, kind) => (kind <= 2 ? new Date(t * 1000).toLocaleDateString("en-US", { timeZone: ET, month: "short", day: "numeric" }) : etTime(new Date(t * 1000)));
+    const chart = (reportChart = LightweightCharts.createChart(box, {
+      autoSize: true, layout: { background: { type: "solid", color: "#000" }, textColor: "#b8bcc6", fontSize: 11 },
+      grid: { vertLines: { visible: false }, horzLines: { color: "#26282d" } }, rightPriceScale: { borderColor: "#2e2e2e", minimumWidth: 84 },
+      timeScale: { borderColor: "#2e2e2e", timeVisible: true, secondsVisible: false, rightOffset: 10, tickMarkFormatter: tick },
+      localization: { timeFormatter: (t) => `${repDate(t * 1000)}, ${etTime(new Date(t * 1000))} ET` }, crosshair: { mode: 0 } }));
+    const candles = chart.addCandlestickSeries({ upColor: "#22a94a", downColor: "#f23645", borderVisible: false, wickUpColor: "#22a94a", wickDownColor: "#f23645",
+      priceLineStyle: 2, autoscaleInfoProvider: (original) => { // every level in view, not only the candles
+        const a = original();
+        if (a) {
+          a.priceRange.minValue = Math.min(a.priceRange.minValue, r.key.price, ...r.bear.levels.map((x) => x.low));
+          a.priceRange.maxValue = Math.max(a.priceRange.maxValue, r.key.price, ...r.bull.levels.map((x) => x.high));
+        }
+        return a;
+      } });
+    candles.priceScale().applyOptions({ scaleMargins: { top: 0.06, bottom: 0.14 } });
+    candles.setData(bars.map((b) => ({ time: b[0], open: b[1], high: b[2], low: b[3], close: b[4] })));
+    const volume = chart.addHistogramSeries({ priceScaleId: "", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false, color: "rgba(150,155,165,.35)" });
+    volume.priceScale().applyOptions({ scaleMargins: { top: 0.86, bottom: 0 } });
+    volume.setData(bars.map((b) => ({ time: b[0], value: b[5] })));
+    const plain = { lineWidth: 2, lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false, autoscaleInfoProvider: () => null };
+    for (const [k, color] of [["ema20", "#f1f1e6"], ["ema50", "#f23645"], ["sma200", "#3aa655"]]) {
+      chart.addLineSeries({ ...plain, lineWidth: 1, color }).setData(r.chart[k].map(([time, value]) => ({ time, value })));
+    }
+    for (const l of r.chart.lines) {
+      chart.addLineSeries({ ...plain, color: l.falling ? "#a64bd6" : "#4aa8ff" }).setData([{ time: l.from, value: l.a }, { time: l.to, value: l.b }]);
+    }
+    candles.createPriceLine({ price: r.key.price, color: "#ffffff", lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: "support to hold" });
+    const boxes = [];
+    for (const [list, color, rgb] of [[r.bull.levels, "#4fc07a", "58,166,85"], [r.bear.levels, "#f07b84", "242,54,69"]]) {
+      for (const x of list) {
+        if (x.low === x.high) candles.createPriceLine({ price: x.low, color, lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: x.what });
+        else boxes.push({ from: null, top: x.high, bottom: x.low, fill: `rgba(${rgb},.16)`, border: `rgba(${rgb},.35)`, color, text: `${x.what}  ${levelText(x)}` });
+      }
+    }
+    const marks = new ChartLabels();
+    candles.attachPrimitive(marks);
+    marks.set([], [], boxes);
+    chart.timeScale().setVisibleLogicalRange({ from: bars.length - 92, to: bars.length + 10 });
+  }).catch(() => { box.innerHTML = `<div class="chart-loading error">Chart unavailable. Check your internet connection.</div>`; });
+}
+
 /* ---------- signals history ---------- */
 
 let histRows = [];
@@ -916,6 +1519,108 @@ $("#sig-kinds").addEventListener("click", (e) => {
   kindFilter = kindFilter === k ? "" : k;
   renderHistory();
 });
+
+/* ---------- signal audit (paperbot/signal_audit.py) ---------- */
+
+const AUDIT_BAD = ["wrong", "missed", "vanished"];
+const AUDIT_NAMES = { ok: "Right", wrong: "Wrong", missed: "Missed", vanished: "Disappeared", wording: "Wording", changed: "Candle corrected",
+  waiting: "Checking", unknown: "No check" };
+const AUDIT_SOURCES = { scan: "Scanner", live: "Live cross", qqe: "QQE", sr: "S/R", sqz: "Squeeze", smc: "Smart Money" };
+let auditData = null; // the day on the Audit tab
+let auditToday = null; // today's, for the charts' tooltips
+let auditByKey = new Map();
+let auditStamp = null;
+
+const signedPct = (x) => (x == null ? "–" : `${x > 0 ? "+" : x < 0 ? "−" : ""}${Math.abs(x).toFixed(2)}%`);
+const auditBad = (c) => AUDIT_BAD.reduce((n, k) => n + (c?.[k] || 0), 0);
+
+function renderAuditPill(a) {
+  const el = $("#pill-audit");
+  const bad = auditBad(a?.counts);
+  el.textContent = !a || a.status === "off" ? "Audit off" : a.status === "stale" ? "Audit stale"
+    : `Audit: ${a.total} checked${bad ? ` · ${[["wrong", (a.counts.wrong || 0) + (a.counts.vanished || 0)], ["missed", a.counts.missed || 0]].filter((x) => x[1]).map((x) => `${x[1]} ${x[0]}`).join(", ")}` : ""}`;
+  el.className = "pill " + (!a || a.status === "off" || a.status === "stale" ? "warn" : bad ? "bad" : "ok");
+  if (a?.updated && a.updated !== auditStamp) { // new results: for the tooltips, and the tab if it's open
+    auditStamp = a.updated;
+    api("/api/audit").then((d) => {
+      auditToday = d;
+      auditByKey = new Map(d.records.map((r) => [r.key, r]));
+      if (activeTab() === "audit" && (!auditData || auditData.day === d.day)) { auditData = d; renderAudit(); }
+    }).catch(() => {});
+  }
+}
+$("#pill-audit").addEventListener("click", () => showTab("audit"));
+$("#pill-audit").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") showTab("audit"); });
+
+// the audit's line in a tooltip
+function auditHtml(key) {
+  const r = auditByKey.get(key);
+  if (!r) return "";
+  const parts = [];
+  if (r.verdict === "ok") parts.push("✓ checked: right");
+  else if (r.verdict === "waiting") parts.push("being checked");
+  else parts.push(`${r.verdict === "wording" ? "!" : r.verdict === "unknown" ? "" : "✗"} ${AUDIT_NAMES[r.verdict].toLowerCase()}${r.faults.length ? `: ${r.faults.join("; ")}` : ""}`);
+  if (r.second === "agrees") parts.push("a second source agrees");
+  if (r.second === "differs") parts.push("a close call: not there on the full-market candles");
+  if (r.after?.["30"] != null) parts.push(`30 min later price had gone ${signedPct(r.after["30"])} its way`);
+  return `<div class="tip-detail audit-${esc(r.verdict)}">Audit ${esc(parts.join(" · "))}</div>`;
+}
+
+loaders.audit = async () => {
+  await loadAudit();
+};
+async function loadAudit() {
+  const d = $("#aud-date").value;
+  auditData = await api(`/api/audit${d ? `?date=${encodeURIComponent(d)}` : ""}`);
+  const days = auditData.days.includes(auditData.day) ? auditData.days : [auditData.day, ...auditData.days];
+  $("#aud-date").innerHTML = days.map((x) => `<option${x === auditData.day ? " selected" : ""}>${esc(x)}</option>`).join("");
+  renderAudit();
+}
+
+function renderAudit() {
+  const a = auditData, c = a.counts || {};
+  const keep = (sel, html) => { const el = $(sel), cur = el.value; el.innerHTML = html; el.value = cur; };
+  keep("#aud-symbol", `<option value="">All symbols</option>` + [...new Set(a.records.map((r) => r.symbol))].sort().map((s) => `<option>${esc(s)}</option>`).join(""));
+  keep("#aud-source", `<option value="">Every signal</option>` + a.table.map((g) =>
+    `<option value="${esc(g.source)}|${g.tf}">${esc(g.name)}${g.tf ? ` ${g.tf}m` : ""}</option>`).join(""));
+  const asked = (c.second_agrees || 0) + (c.second_differs || 0);
+  const done = a.table.reduce((n, g) => n + g.done, 0), right = a.table.reduce((n, g) => n + g.right, 0);
+  const usual = a.table.reduce((n, g) => n + (g.usual_right ?? 0) * g.done, 0);
+  const off = Object.values(a.candles || {}).reduce((n, x) => n + x.differ.length, 0);
+  const compared = Object.values(a.candles || {}).reduce((n, x) => n + x.compared, 0);
+  const tile = (name, value, note, cls = "") => `<div class="aud-tile"><span>${esc(name)}</span><b class="${cls}">${esc(value)}</b><small>${esc(note)}</small></div>`;
+  $("#aud-tiles").innerHTML =
+    tile("Signals checked", a.total || 0, a.updated ? `last look ${etTime(new Date(a.updated), true)} ET` : "the audit hasn't run") +
+    tile("Right", c.ok || 0, "worked out again, same answer", "up") +
+    tile("Wrong", (c.wrong || 0) + (c.vanished || 0), "says something its candles don't", (c.wrong || c.vanished) ? "down" : "") +
+    tile("Missed", c.missed || 0, "should have fired and didn't", c.missed ? "down" : "") +
+    tile("Wording", c.wording || 0, "right, but its text was loose") +
+    tile("Second source", asked ? `${Math.round((100 * (c.second_agrees || 0)) / asked)}%` : "–", `${c.second_agrees || 0} of ${asked} also there on full-market candles`) +
+    tile("Candles", compared ? `${compared - off} of ${compared}` : "–", "match the full market's") +
+    tile("Went its way", done ? `${Math.round((100 * right) / done)}%` : "–", done ? `after 30 min; any candle: ${Math.round((100 * usual) / done)}%` : "after 30 min");
+  $("#aud-groups").innerHTML = `<tr><th>Indicator</th><th>Signals</th><th>Right</th><th>Wrong or missed</th><th>Close calls</th><th>Went its way</th><th>Any candle</th><th>Average move</th><th>Any candle</th></tr>` +
+    a.table.map((g) => `<tr><td><b>${esc(g.name)}</b>${g.tf ? ` ${g.tf}m` : ""}</td><td class="mono">${g.n}</td><td class="mono">${g.ok}</td>
+      <td class="mono ${g.bad ? "down" : ""}">${g.bad}</td><td class="mono">${g.differs}</td>
+      <td class="mono">${g.done ? `${Math.round((100 * g.right) / g.done)}% of ${g.done}` : "–"}</td><td class="mono muted">${g.usual_right == null ? "–" : Math.round(100 * g.usual_right) + "%"}</td>
+      <td class="mono ${tone(g.avg)}">${signedPct(g.avg)}</td><td class="mono muted">${signedPct(g.usual_avg)}</td></tr>`).join("");
+  const sym = $("#aud-symbol").value, src = $("#aud-source").value, v = $("#aud-verdict").value;
+  const rows = a.records.filter((r) => (!sym || r.symbol === sym) && (!src || `${r.source}|${r.tf}` === src) &&
+    (!v || (v === "problems" ? AUDIT_BAD.includes(r.verdict) : v === "differs" ? r.second === "differs" : r.verdict === v)));
+  const status = { running: "checking once a minute", idle: "waiting for the next session", stale: "not running", off: "not running", past: "" }[a.status];
+  $("#aud-note").textContent = `${rows.length} shown${status ? ` · ${status}` : ""}`;
+  const second = { agrees: "agrees", differs: "close call", none: "–" };
+  const result = { right: `<span class="up">went its way</span>`, wrong: `<span class="down">went against</span>`, flat: "flat" };
+  $("#aud-table").innerHTML = `<tr><th>Time</th><th>Symbol</th><th>Chart</th><th>Side</th><th>Signal</th><th>Check</th><th>Why</th><th>Second source</th><th>15 min</th><th>30 min</th><th>After 30 min</th></tr>` +
+    (rows.slice(0, 600).map((r) => `<tr><td class="mono">${hm(r.time)}</td><td><b>${esc(r.symbol)}</b></td><td>${r.tf ? r.tf + "m" : "live"}</td><td>${sideBadge(r.side)}</td>
+      <td title="${esc(r.detail || "")}">${esc(r.name)}</td><td><span class="tag audit-tag ${esc(r.verdict)}">${esc(AUDIT_NAMES[r.verdict] || r.verdict)}</span></td>
+      <td class="small">${esc([...r.faults, ...(r.second_faults || [])].join("; "))}${(r.late || 0) > 120 ? ` <span class="muted">logged ${Math.round(r.late / 60)} min late</span>` : ""}</td>
+      <td class="small">${second[r.second] || "16 min after"}</td><td class="mono ${tone(r.after?.["15"])}">${signedPct(r.after?.["15"])}</td>
+      <td class="mono ${tone(r.after?.["30"])}">${signedPct(r.after?.["30"])}</td><td class="small">${result[r.result] || "–"}</td></tr>`).join("") ||
+      `<tr><td colspan="11" class="muted">${v === "problems" ? "No problems found." : "Nothing here."}</td></tr>`) +
+    (rows.length > 600 ? `<tr><td colspan="11" class="muted">The first 600 of ${rows.length}.</td></tr>` : "");
+}
+$("#aud-date").addEventListener("change", loadAudit);
+["#aud-symbol", "#aud-source", "#aud-verdict"].forEach((s) => $(s).addEventListener("change", renderAudit));
 
 /* ---------- patterns ---------- */
 

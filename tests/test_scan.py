@@ -285,6 +285,42 @@ def test_catch_up_finds_signals_from_earlier_bars_once(cfg):
     assert all(f.signal.kind != "breakout" for f in again.scan(catch_up=True).found) and rec2.sent == []
 
 
+def test_candles_missed_while_asleep_are_caught_up_and_only_the_last_alerts(cfg):
+    """The lid was closed from 10:21 to 10:50: the 10:20 breakout is logged late, for the charts, but not pushed to the phone."""
+    source = FakeSource({"NVDA": quiet_after_breakout()[:-6]}, [])
+    clock = [at(TODAY, 10) + timedelta(seconds=5)]
+    scanner, rec = make_scanner(cfg, source, lambda: clock[0])
+    source.bars = {"NVDA": breakout_bars()[:-1]}
+    waits = []
+
+    def sleep(seconds):
+        waits.append(seconds)
+        if len(waits) == 1:
+            clock[0], source.bars = at(TODAY, 16) + timedelta(seconds=10), {"NVDA": quiet_after_breakout()}
+        else:
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        scan_forever(scanner, print_fn=lambda text: None, sleep=sleep)
+    logged = [e for e in scanner.journal.events(TODAY, "chart_signal") if e["kind"] == "breakout"]
+    assert [e["bar_time"] for e in logged if e["level"] == "prior-day high"] == [at(TODAY, 10).isoformat()]
+    assert not any("Breakout" in m for _, m, _ in rec.sent)
+
+
+def test_a_cross_while_asleep_is_not_reported_as_happening_now(cfg):
+    source = FakeSource({"SPY": breakout_bars()[:-1]}, [])
+    clock = [at(TODAY, 10) + timedelta(seconds=5)]
+    scanner, rec = make_scanner(cfg, source, lambda: clock[0])
+    scanner.scan()
+    sent = len(rec.sent)
+    source.prices = {"SPY": 101.4}  # over the prior-day high, 101, but nothing was read for three minutes
+    clock[0] += timedelta(minutes=3)
+    assert "crossed" not in scanner.tick() and len(rec.sent) == sent
+    source.prices = {"SPY": 100.5}  # and a cross that is seen still counts
+    clock[0] += timedelta(seconds=10)
+    assert "crossed below the prior-day high" in scanner.tick()
+
+
 def test_print_only_scan_does_not_hide_signals_from_the_alerting_run(cfg):
     clock = [at(TODAY, 11) + timedelta(seconds=10)]
     source = FakeSource({"NVDA": breakout_bars()}, [])
@@ -570,3 +606,12 @@ def test_live_loop_started_between_sessions_shows_the_last_session_without_alert
     view = scanner.view["SPY"]
     assert len(view["bars"]) == 16 * 12 and view["bars"][0][6] == 1 and view["bars"][66][6] == 0  # pre-market, then 9:30
     assert rec.sent == [] and "SPY" not in scanner.watch
+
+
+def test_a_vwap_touch_says_exactly_how_close_the_candle_came():
+    from paperbot.patterns import _reached
+
+    assert _reached(700.10, 700.11, up=True) == "VWAP 700.10 (high 700.11)"
+    assert _reached(700.10, 699.98, up=True) == "within 0.12 of VWAP 700.10 (high 699.98)"
+    assert _reached(700.10, 700.05, up=False) == "VWAP 700.10 (low 700.05)"
+    assert _reached(700.10, 700.25, up=False) == "within 0.15 of VWAP 700.10 (low 700.25)"

@@ -267,18 +267,36 @@ class _BrowserLogin:
                                        iss=self.result.get("iss"))
 
 
+def _borrowed(path: Path):
+    import httpx2
+
+    class Borrowed(httpx2.Auth):
+        def auth_flow(self, request):
+            token = (_FileTokenStorage(path)._read().get("tokens") or {}).get("access_token")
+            if not token:
+                raise RobinhoodError("not signed in to Robinhood (run `paperbot robinhood-login`)")
+            request.headers["Authorization"] = f"Bearer {token}"
+            yield request
+    return Borrowed()
+
+
 class RobinhoodMCP:
     """One connection per snapshot: positions, then bars for everything held plus the watchlist."""
 
     def __init__(self, url: str, callback_port: int = 33418, token_path: Path = TOKEN_PATH,
-                 open_browser: Callable[[str], Any] = webbrowser.open):
+                 open_browser: Callable[[str], Any] = webbrowser.open, borrow: bool = False):
+        """borrow: use the sign-in another process keeps, read-only. It never renews it or signs in, so two
+        processes can't renew it at once and lose it; when it has run out, calls fail until that process renews it."""
         if not url:
             raise ValueError("ROBINHOOD_MCP_URL is not set (see .env.example)")
         self.url = url
         self.token_path = token_path
         self.login = _BrowserLogin(callback_port, open_browser)
+        self.borrow = borrow
 
     def _auth(self):
+        if self.borrow:
+            return _borrowed(self.token_path)
         from mcp.client.auth import OAuthClientProvider
         from mcp.shared.auth import OAuthClientMetadata
 
@@ -352,6 +370,20 @@ class RobinhoodMCP:
                         for sym, rows in parse_bars(data.get("results") or []).items():
                             out.setdefault(sym, []).extend(rows)
                 t = end
+            return out
+        return asyncio.run(self._with_client(work))
+
+    def long_bars(self, symbol: str, bar_minutes: int, start: datetime, end: datetime, bounds: str = "24_5") -> list[Bar]:
+        """One symbol's candles over months, around the clock by default, two weeks to a call."""
+        async def work(call):
+            out: list[Bar] = []
+            t = start
+            while t < end:
+                stop = min(t + timedelta(days=14), end)
+                data = await call("get_equity_historicals", {"symbols": [symbol], "interval": INTERVALS[bar_minutes], "bounds": bounds,
+                                                             "start_time": _rfc3339(t), "end_time": _rfc3339(stop)})
+                out += parse_bars(data.get("results") or []).get(symbol, [])
+                t = stop
             return out
         return asyncio.run(self._with_client(work))
 

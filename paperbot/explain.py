@@ -647,10 +647,17 @@ EXPLAIN: dict[str, tuple[str, str]] = {
 }
 
 
+AT_A_LEVEL = {"bullish_engulfing": "a support level", "hammer": "a support level",
+              "bearish_engulfing": "a resistance level", "shooting_star": "a resistance level"}
+
+
 def glossary() -> dict[str, dict[str, str]]:
     """Every signal kind: its label, what it looks like (candles only), what it means and an example."""
     out = {}
     for kind, label in {**LABELS, LIVE_CROSS: "Live level cross"}.items():
         meaning, example = EXPLAIN[kind]
-        out[kind] = {"label": label, "looks": CANDLES.get(kind, ("", ""))[1], "meaning": meaning, "example": example}
+        looks = CANDLES.get(kind, ("", ""))[1]
+        if kind in AT_A_LEVEL:  # also reported at a level, whatever came before
+            looks += f", or at {AT_A_LEVEL[kind]}"
+        out[kind] = {"label": label, "looks": looks, "meaning": meaning, "example": example}
     return out

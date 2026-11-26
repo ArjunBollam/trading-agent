@@ -158,3 +158,20 @@ def test_patterns_tab_carries_the_explanations(web):
     rows = {p["kind"]: p for p in web.get("/api/patterns").json()["patterns"]}
     assert rows["double_top"]["meaning"].startswith("Two peaks") and rows["double_top"]["example"]
     assert all(p["meaning"] and p["example"] for p in rows.values())
+
+
+def test_every_chart_box_the_script_uses_is_on_the_page():
+    """A box the script looks for and the page lacks would stop the whole dashboard from loading."""
+    import re
+
+    from paperbot.web.server import STATIC
+
+    js, html = (STATIC / "app.js").read_text(), (STATIC / "index.html").read_text()
+    overlays = re.search(r"const showOverlay = \{(.*?)\}", js).group(1)
+    parts = re.search(r"const showSmc = \{(.*?)\}", js).group(1)
+    ids = [f"{k}-on" for k in re.findall(r"(\w+):", overlays)] + [f"smc-{k}-on" for k in re.findall(r"(\w+):", parts)]
+    assert len(ids) >= 10
+    used = ids + re.findall(r'\$\("#([\w-]+)"\)', js)
+    made_by_script = set(re.findall(r'id="([\w-]+)"', js))  # e.g. the report's live box, built with the report
+    missing = sorted({i for i in used if f'id="{i}"' not in html and i not in made_by_script})
+    assert missing == []

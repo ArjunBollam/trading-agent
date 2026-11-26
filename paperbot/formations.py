@@ -242,6 +242,17 @@ def mirror(bars: list[Bar]) -> list[Bar]:
     return [Bar(b.t, -b.o, -b.l, -b.h, -b.c, b.v) for b in bars]
 
 
+def reached(name: str, level: float, extreme: float, up: bool) -> str:
+    """"the pivot S1 29.20 (low 29.17)", or "within 0.03 of the pivot S1 29.20 (low 29.23)" when the candle only came close."""
+    near = "" if (extreme >= level if up else extreme <= level) else f"within {abs(extreme - level):.2f} of "
+    return f"{near}{name} {level:.2f} ({'high' if up else 'low'} {extreme:.2f})"
+
+
+def tested(name: str, level: float, extreme: float, up: bool) -> str:
+    text = reached(name, level, extreme, up)
+    return ("came " if text.startswith("within ") else "tested ") + text
+
+
 def _fit(points: list[Pivot]) -> tuple[float, float]:
     """Least-squares line through the points: (slope per bar, intercept)."""
     n = len(points)
@@ -789,9 +800,8 @@ def fib_patterns(bars: list[Bar], atr: float, cfg: ScanConfig) -> list[Hit]:
                     lv = hi.price - r * swing
                     if (lv - 2 * tol <= last.l <= lv + tol and last.c > lv + buf and prev.c > lv
                             and all(x.l > lv for x in since)):  # the first bar to reach it
-                        detail = (f"tested the {r * 100:.1f}% retracement {real(lv):.2f} of the "
-                                  f"{real(lo.price):.2f}→{real(hi.price):.2f} swing ({'high' if flip else 'low'} "
-                                  f"{real(last.l):.2f}) and closed {'below' if flip else 'above'} it")
+                        what = f"the {r * 100:.1f}% retracement of the {real(lo.price):.2f}→{real(hi.price):.2f} swing,"
+                        detail = (f"{tested(what, real(lv), real(last.l), up=flip)} and closed {'below' if flip else 'above'} it")
                         out.append(("fib_resistance" if flip else "fib_support", side, detail, False,
                                     f"fib {r * 100:.1f}%"))
                         break

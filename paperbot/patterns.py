@@ -235,6 +235,11 @@ def rsi_and_trend(bars: list[Bar], cfg: ScanConfig) -> tuple[float | None, str |
     return None if rsi is None else round(rsi, 1), _trend(ema_series(closes, 9)[-1], ema_series(closes, 21)[-1])
 
 
+def _reached(vwap: float, extreme: float, up: bool) -> str:
+    """"VWAP 700.10 (high 700.11)", or "within 0.12 of VWAP 700.10 (high 699.98)" when the candle only came close."""
+    return formations.reached("VWAP", vwap, extreme, up)
+
+
 def analyze(symbol: str, bars: list[Bar], day: date, cfg: ScanConfig, daily: list[Bar] | None = None,
             ) -> tuple[list[ChartSignal], Summary]:
     """Signals on the last bar of `bars` (completed bars, oldest first). Bars from earlier sessions
@@ -275,9 +280,9 @@ def analyze(symbol: str, bars: list[Bar], day: date, cfg: ScanConfig, daily: lis
         elif prev.c > vw[-2] and last.c < vwap_now - swing:
             add("vwap_lost", "sell", f"closed below VWAP {vwap_now:.2f}")
         elif prev.c > vw[-2] and last.l <= vwap_now + tol and last.c > vwap_now + swing and last.c > last.o:
-            add("vwap_bounce", "buy", f"dipped to VWAP {vwap_now:.2f} and closed above it")
+            add("vwap_bounce", "buy", f"dipped to {_reached(vwap_now, last.l, up=False)} and closed above it")
         elif prev.c < vw[-2] and last.h >= vwap_now - tol and last.c < vwap_now - swing and last.c < last.o:
-            add("vwap_reject", "sell", f"rallied to VWAP {vwap_now:.2f} and closed below it")
+            add("vwap_reject", "sell", f"rallied to {_reached(vwap_now, last.h, up=True)} and closed below it")
 
     # RSI
     r0, r1 = rsi[-2], rsi[-1]
@@ -356,30 +361,29 @@ def analyze(symbol: str, bars: list[Bar], day: date, cfg: ScanConfig, daily: lis
     held_res = [lv for lv in res if prev.c < lv.price and lv.price - tol <= last.h <= lv.price + tol and last.c < lv.price]
     if held_sup and not broken_down:
         lv = min(held_sup, key=lambda x: abs(x.price - last.l))
-        add("support_test", "buy", f"tested the {lv.name} {lv.price:.2f} (low {last.l:.2f}) and closed above it", lv.name)
+        add("support_test", "buy", f"{formations.tested(f'the {lv.name}', lv.price, last.l, up=False)} and closed above it", lv.name)
     if held_res and not broken_up:
         lv = min(held_res, key=lambda x: abs(x.price - last.h))
-        add("resistance_test", "sell", f"tested the {lv.name} {lv.price:.2f} (high {last.h:.2f}) and closed below it", lv.name)
+        add("resistance_test", "sell", f"{formations.tested(f'the {lv.name}', lv.price, last.h, up=True)} and closed below it", lv.name)
 
-    # Reversal candles, only where they mean something: at a support or resistance (VWAP included)
-    near_sup = [lv for lv in sup if abs(last.l - lv.price) <= 2 * tol]
-    near_res = [lv for lv in res if abs(last.h - lv.price) <= 2 * tol]
-    if vwap_now is not None:
-        if abs(last.l - vwap_now) <= 2 * tol:
-            near_sup.append(Level("VWAP", vwap_now))
-        if abs(last.h - vwap_now) <= 2 * tol:
-            near_res.append(Level("VWAP", vwap_now))
+    # Reversal candles, only where they mean something: at a support the candle closed above, or a resistance it closed
+    # below (VWAP included). A level price has already gone through isn't support or resistance on that side any more.
+    vwap_level = [Level("VWAP", vwap_now)] if vwap_now is not None else []
+    near_sup = [lv for lv in sup + vwap_level if abs(last.l - lv.price) <= 2 * tol and last.c > lv.price]
+    near_res = [lv for lv in res + vwap_level if abs(last.h - lv.price) <= 2 * tol and last.c < lv.price]
     body = abs(last.c - last.o)
     upper_wick, lower_wick = last.h - max(last.c, last.o), min(last.c, last.o) - last.l
     big_enough = a > 0 and (last.h - last.l) >= 0.5 * a
     if near_sup:
-        where = f"at the {near_sup[0].name} {near_sup[0].price:.2f}"
+        lv = min(near_sup, key=lambda x: abs(x.price - last.l))
+        where = f"{'at' if last.l <= lv.price else 'near'} the {lv.name} {lv.price:.2f}"
         if prev.c < prev.o and last.c > last.o and last.o <= prev.c and last.c >= prev.o:
             add("bullish_engulfing", "buy", f"green bar engulfed the prior red bar {where}")
         elif big_enough and body > 0 and lower_wick >= 2 * body and upper_wick <= body:
             add("hammer", "buy", f"long lower wick {where}: buyers stepped in")
     if near_res:
-        where = f"at the {near_res[0].name} {near_res[0].price:.2f}"
+        lv = min(near_res, key=lambda x: abs(x.price - last.h))
+        where = f"{'at' if last.h >= lv.price else 'near'} the {lv.name} {lv.price:.2f}"
         if prev.c > prev.o and last.c < last.o and last.o >= prev.c and last.c <= prev.o:
             add("bearish_engulfing", "sell", f"red bar engulfed the prior green bar {where}")
         elif big_enough and body > 0 and upper_wick >= 2 * body and lower_wick <= body:

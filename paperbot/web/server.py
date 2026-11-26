@@ -18,9 +18,11 @@ import re
 import secrets
 import subprocess
 import sys
+import threading
 import time
 from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -30,8 +32,9 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from .. import explain, formations
+from .. import explain, formations, outlook
 from ..config import Config, ScanConfig
+from ..features import Bar
 from ..journal import Journal
 from ..livelist import LiveList
 from ..overrides import NOT_HERE, Overrides
@@ -68,6 +71,8 @@ COMMANDS = {
     "rehearse": {"args": ["rehearse"], "label": "Rehearse", "about": "One full cycle on real data and the AI; never trades (uses AI tokens)"},
     "scan": {"args": ["scan", "--no-alerts", "--catch-up"], "label": "Scan now",
              "about": "Every signal since the open on your Robinhood positions; print only (read-only)"},
+    "outlook": {"args": ["outlook"], "label": "Outlook now",
+               "about": "The key support and the bullish and bearish scenarios, as the chart is now (read-only)"},
     "test-alert": {"args": ["test-alert"], "label": "Test alert", "about": "Send a test alert to your phone", "changes": True},
     "watch-once": {"args": ["watch-once"], "label": "Protection tick",
                    "about": "One pass of exits, stops and the loss limit; can close paper positions", "changes": True},
@@ -191,6 +196,55 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
     async def signals(request: Request) -> Response:
         c = cfg()
         return JSONResponse({"date": day_param(request, c).isoformat(), "signals": signal_rows(c, day_param(request, c))})
+
+    def audit_state(c: Config) -> dict:
+        """The signal audit's latest totals (signal_audit.py), and whether it's running."""
+        now = datetime.now(c.schedule.tz)
+        try:
+            state = json.loads((c.log_dir / "audit_state.json").read_text())
+            age = (now - datetime.fromisoformat(state["updated"])).total_seconds()
+        except (OSError, ValueError, KeyError):
+            return {"status": "off"}
+        on = scan_hours(now, overrides(c).scan().sessions)
+        return state | {"status": "idle" if not on else "running" if age <= 240 else "stale", "age_seconds": round(age)}
+
+    async def audit(request: Request) -> Response:
+        c = cfg()
+        day = day_param(request, c)
+        try:
+            data = json.loads((c.log_dir / "audit" / f"{day.isoformat()}.json").read_text())
+        except (OSError, ValueError):
+            data = {"day": day.isoformat(), "updated": None, "records": [], "counts": {}, "table": [], "total": 0}
+        days = sorted((p.stem for p in (c.log_dir / "audit").glob("*.json") if DATE.match(p.stem)), reverse=True)
+        return JSONResponse(data | {"days": days, "status": audit_state(c)["status"] if day == today(c) else "past"})
+
+    def reports(c: Config) -> list[dict]:
+        out = []
+        for path in outlook.saved(c.log_dir / "reports")[:60]:
+            try:
+                r = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            out.append({k: r.get(k) for k in ("id", "symbol", "at", "day", "title", "kind", "price", "bias")})
+        return out
+
+    async def report_list(request: Request) -> Response:
+        return JSONResponse({"reports": reports(cfg())})
+
+    async def report_view(request: Request) -> Response:
+        """A report, and what price has done since: from the live scanner's candles on its own day, then as it was written down."""
+        c = cfg()
+        paths = {p.stem: p for p in outlook.saved(c.log_dir / "reports")}
+        path = paths.get(request.path_params["id"])
+        if path is None:
+            return error("no such report", 404)
+        r = json.loads(path.read_text())
+        if not r.get("outcome"):
+            view = (scanner_state(c).get("symbols") or {}).get(r["symbol"]) or {}
+            tz = c.schedule.tz
+            rows = [Bar(datetime.fromtimestamp(b[0], tz), *b[1:6]) for b in view.get("bars") or []]
+            r["outcome"] = outlook.follow(r, rows)
+        return JSONResponse(r)
 
     async def dates(request: Request) -> Response:
         c = cfg()
@@ -344,7 +398,9 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
         now = now or datetime.now(c.schedule.tz)
         scanner = scanner_state(c)
         return {"version": version(), "now": now.isoformat(), "market_open": market_hours(now),
-                "session": session_at(now), "scanner": scanner, "live_symbols": live_list(c).info(), "halts": halts(c)}
+                "session": session_at(now), "scanner": scanner, "live_symbols": live_list(c).info(), "halts": halts(c),
+                "report": next((r for r in reports(c) if r["kind"] == "morning" and r["day"] == now.date().isoformat()), None),
+                "audit": {k: v for k, v in audit_state(c).items() if k in ("status", "age_seconds", "updated", "day", "total", "counts")}}
 
     def page_snapshot(c: Config) -> dict:
         now = datetime.now(c.schedule.tz)
@@ -399,6 +455,9 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
         Route("/api/state", state),
         Route("/api/chart", chart),
         Route("/api/signals", signals),
+        Route("/api/audit", audit),
+        Route("/api/reports", report_list),
+        Route("/api/reports/{id}", report_view),
         Route("/api/dates", dates),
         Route("/api/live-symbols", live_symbols, methods=["GET", "POST"]),
         Route("/api/patterns", patterns, methods=["GET", "POST"]),
@@ -418,16 +477,55 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
     return app
 
 
+def report_due(c: Config, now: datetime) -> bool:
+    """Whether today's morning report should be made: from its time on, on a weekday, until it's there."""
+    r = c.daily_report
+    local = now.astimezone(ZoneInfo(r.timezone))
+    if not r.enabled or local.weekday() >= 5 or not r.at <= local.time() < r.until:
+        return False
+    day = now.astimezone(c.schedule.tz).date().isoformat()
+    for path in outlook.saved(c.log_dir / "reports"):
+        if not path.stem.startswith(day):
+            break  # newest first
+        try:
+            if json.loads(path.read_text()).get("kind") == "morning":
+                return False
+        except (OSError, ValueError):
+            continue
+    return True
+
+
+def morning_reports(config_path: Path, run=subprocess.run, sleep=time.sleep, now=lambda: datetime.now().astimezone()) -> None:
+    """Make each day's report at its time, in its own process. A failure is tried again after 5 minutes; a day without trading isn't."""
+    given_up: date | None = None
+    while True:
+        try:
+            c = Config.load(config_path)
+            at = now()
+            if at.date() != given_up and report_due(c, at):
+                out = run([sys.executable, "-m", "paperbot", "--config", str(config_path), "outlook", "--morning"], cwd=config_path.parent,
+                          capture_output=True, text=True, timeout=300, check=False)
+                print(f"{at:%H:%M} morning report: " + (out.stdout.splitlines()[0] if out.returncode == 0 and out.stdout else
+                                                         (out.stdout + out.stderr).strip()[-300:]), flush=True)
+                if out.returncode == 3:
+                    given_up = at.date()
+                elif out.returncode:
+                    sleep(270)
+        except Exception as e:  # nothing here may stop the page
+            print(f"morning report failed: {e!r}", flush=True)
+        sleep(30)
+
+
 def serve(config_path: Path, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False) -> None:
     import uvicorn
 
     if host not in ("127.0.0.1", "localhost", "::1"):
         raise ValueError("the web page only listens on this computer (127.0.0.1)")
     app = create_app(config_path)
+    threading.Thread(target=morning_reports, args=(Path(config_path).resolve(),), daemon=True).start()
     url = f"http://127.0.0.1:{port}/"
     print(f"paperbot web: {url}  (this computer only; Ctrl-C to stop)", flush=True)
     if open_browser:
-        import threading
         import webbrowser
 
         threading.Timer(1.0, webbrowser.open, [url]).start()

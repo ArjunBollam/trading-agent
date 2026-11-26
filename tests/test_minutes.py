@@ -26,12 +26,16 @@ def minute_bars(day, n: int, closes: list[float]) -> list[Bar]:
 class MinuteSource(FakeSource):
     def __init__(self, bars, minutes, fail=False):
         super().__init__(bars, [])
-        self.minutes, self.fail, self.chart_calls = minutes, fail, []
+        self.minutes, self.fail, self.chart_calls, self.history_calls = minutes, fail, [], []
+        self.history = {}
 
     def chart_bars(self, symbols, bar_minutes, start, extended=False):
-        self.chart_calls.append((tuple(symbols), bar_minutes, start, extended))
+        calls = self.chart_calls if bar_minutes == 1 else self.history_calls  # the overlays' longer history
+        calls.append((tuple(symbols), bar_minutes, start, extended))
         if self.fail:
             raise RuntimeError("no candles")
+        if bar_minutes != 1:
+            return self.history
         return {s: [b for b in self.minutes if b.t >= start] for s in symbols}
 
 

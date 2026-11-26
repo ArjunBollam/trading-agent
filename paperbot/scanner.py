@@ -23,8 +23,10 @@ from .features import SESSIONS, Bar, atr, regular, session_of
 from .journal import Journal
 from .notify import Alerts
 from .orderflow import Check, check
+from .overlays import level_breaks, overnight_gap, pivot_levels, squeeze
 from .patterns import ChartSignal, Level, Summary, analyze, levels, rsi_and_trend, session_vwaps
 from .qqe import qqe
+from .smc import smart_money
 from .robinhood import Holding, MarketSource, OptionHolding, mask
 
 MARKET_OPEN, MARKET_CLOSE = time(9, 30), time(16, 0)
@@ -149,13 +151,15 @@ class Scanner:
         self.watch: dict[str, Watch] = {}  # for tick(), refreshed by every scan
         self.live_fired: dict[tuple, datetime] = {}
         self.positions: tuple[datetime, list[Holding], list[OptionHolding]] | None = None  # for tick(), with their time
+        self._seen_at: datetime | None = None  # the last time prices were read
         self.state_path = state_path  # where the web page reads the latest prices, candles, levels and positions
         self.view: dict[str, dict] = {}
         self.prices: dict[str, float] = {}
         self.marks: dict[str, float] = {}
         self.forming: dict[str, list] = {}  # symbol -> [bar start, open, high, low, close] from live prices
+        self.deep: dict[str, tuple[tuple[date, int], list[Bar]]] = {}  # earlier sessions' candles, for the overlays
         self.minute: dict[str, dict[datetime, Bar]] = {}  # 1-minute candles, for the page's 1m charts only
-        self.minute_stats: dict[str, dict] = {}  # symbol -> QQE, RSI and trend on them, and their order flow
+        self.minute_stats: dict[str, dict] = {}  # symbol -> the overlays, RSI and trend on them, and their order flow
         self.minute_flow = minute_flow  # a FlowTracker on 1-minute candles, apart from the one signals use
         self.minute_forming: dict[str, list] = {}
         self._minute_at: datetime | None = None  # the minute they were last looked for in
@@ -175,9 +179,9 @@ class Scanner:
             if key not in self.last_fired or t > self.last_fired[key]:
                 self.last_fired[key] = t
 
-    def _flow_signals(self, sym: str, bars: list[Bar], day: date, now: datetime, catch_up: bool) -> list[ChartSignal]:
+    def _flow_signals(self, sym: str, bars: list[Bar], day: date, now: datetime, catch_up: bool | datetime) -> list[ChartSignal]:
         """Order-flow signals (orderflow.py) from the trade tape, on the last completed bar, or on every
-        bar with catch_up. A tape outage costs only these signals."""
+        bar with catch_up (or every one after it). A tape outage costs only these signals."""
         self.flow_bars.pop(sym, None)
         of = self.cfg.orderflow
         if self.flow is None or not (of.in_scan or of.check_signals or of.in_context):
@@ -196,12 +200,15 @@ class Scanner:
         self.flow_bars[sym] = fbars
         if not of.in_scan:
             return []  # the bars are still used, to check chart signals and in the bigger picture
-        keep = sigs if catch_up else [s for s in sigs if s.bar_time == fbars[-1].t]
+        keep = ([s for s in sigs if s.bar_time > catch_up] if isinstance(catch_up, datetime) else sigs if catch_up
+                else [s for s in sigs if s.bar_time == fbars[-1].t])
         return [ChartSignal(sym, s.kind, s.side, s.price, s.bar_time, s.detail, s.level, s.weak) for s in keep]
 
-    def scan(self, send_alerts: bool = True, catch_up: bool = False) -> ScanResult:
+    def scan(self, send_alerts: bool = True, catch_up: bool | datetime = False) -> ScanResult:
         """Signals on the last completed bar, or with catch_up on every completed bar since the open
         (for scans hours apart). Only signals not already alerted today are returned and sent.
+        With a time, on every bar that starts after it: the ones missed while the computer slept or was offline.
+        Those are logged, and drawn on the charts, but only the last bar's go to the phone.
         A print-only scan (send_alerts=False) doesn't record its signals, so it can't hide them
         from a later alerting scan."""
         sc, tz = self.cfg.scan, self.cfg.schedule.tz
@@ -214,6 +221,7 @@ class Scanner:
                                     now - timedelta(days=400) if need_daily else None,
                                     extended=bool({"pre", "post"} & set(sc.sessions)))
         self.positions = (now, snap.holdings, snap.options)
+        self._seen_at = now
         self._seed(day)  # after the fetch, so a scan that finished meanwhile is seen
         if need_daily:
             self.daily = (day, snap.daily)
@@ -223,6 +231,7 @@ class Scanner:
         for o in snap.options:
             held_options[o.symbol] = held_options.get(o.symbol, ()) + (o,)
         step = timedelta(minutes=sc.bar_minutes)
+        self._deepen([s for s in snap.bars if not self.only or s in self.only], now)
         summaries, found, contexts = [], [], {}
         for sym, rows in snap.bars.items():
             if self.only and sym not in self.only:
@@ -231,7 +240,8 @@ class Scanner:
             sessions = sorted({b.t.date() for b in bars})[-3:]  # today plus two sessions of indicator warm-up
             bars = [b for b in bars if b.t.date() in sessions]
             day_bars = [b.__class__(b.t.astimezone(tz), b.o, b.h, b.l, b.c, b.v) for b in daily.get(sym, [])]
-            ends = [i + 1 for i, b in enumerate(bars) if b.t.date() == day] if catch_up else []
+            ends = [i + 1 for i, b in enumerate(bars) if b.t.date() == day
+                    and (not isinstance(catch_up, datetime) or b.t > catch_up)] if catch_up else []
             signals: list[tuple[ChartSignal, Context]] = []
             flow_signals = self._flow_signals(sym, bars, day, now, catch_up)
             fbars = self.flow_bars.get(sym, [])
@@ -259,8 +269,13 @@ class Scanner:
                                        for b in shown], "levels": [],  # the last item: pre-market or after hours
                               "context": {"bias": ctx.bias, "score": ctx.score,
                                           "factors": [{"side": f.side, "weight": f.weight, "text": f.text} for f in ctx.factors]}}
-            if sc.qqe and shown:
-                self.view[sym]["qqe"] = self._qqe([b for b in bars if regular(b)], shown_day)
+            if shown:
+                rth = self._with_history(sym, [b for b in bars if regular(b)])
+                past = sorted({b.t.date() for b in rth if b.t.date() < shown_day})
+                since = past[-sc.chart_sessions:][0] if past and sc.chart_sessions else shown_day
+                self.view[sym]["earlier"] = [[int(b.t.timestamp()), b.o, b.h, b.l, b.c, b.v, 0]
+                                             for b in rth if since <= b.t.date() < shown_day]
+                self.view[sym] |= self._overlays(rth, shown_day, since)
             if shown_day == day and fbars:
                 # per candle: start time, delta (bought at the offer minus sold at the bid), session CVD
                 self.view[sym]["flow"] = {"feed": self.cfg.orderflow.feed,
@@ -297,7 +312,8 @@ class Scanner:
                                  flow=chk.verdict if chk else None, flow_detail=chk.text() if chk else None)
             found += new
             loud = [f for f in new if (sc.alert_weak or not f.signal.weak)
-                    and not (sc.context_mode == "suppress" and f.conflict)]
+                    and not (sc.context_mode == "suppress" and f.conflict)
+                    and not (isinstance(catch_up, datetime) and bars and f.signal.bar_time < bars[-1].t)]
             if send_alerts and loud:
                 groups = [loud] if sc.one_alert_per_symbol else [[f] for f in loud]
                 for g in groups:
@@ -326,6 +342,9 @@ class Scanner:
             self.positions = (now, live.holdings, live.options)
         self.prices.update(live.prices)
         self.marks.update(live.marks)
+        # after a pause (asleep, offline) it isn't known when a level was crossed, so that isn't reported as happening now
+        blind = self._seen_at is not None and now - self._seen_at > timedelta(seconds=max(90, 3 * sc.tick_seconds))
+        self._seen_at = now
         bar = now.replace(second=0, microsecond=0) - timedelta(minutes=now.minute % sc.bar_minutes)
         lines = []
         for sym in syms:
@@ -341,7 +360,7 @@ class Scanner:
                 was = w.sides.get(lv.name, 0)
                 if side:
                     w.sides[lv.name] = side
-                if side and was and side != was:
+                if side and was and side != was and not blind:
                     key = (sym, lv.name, side)
                     last = self.live_fired.get(key)
                     if last is None or now - last >= timedelta(minutes=sc.tick_cooldown_minutes):
@@ -460,8 +479,7 @@ class Scanner:
                 if bars:
                     rsi, trend = rsi_and_trend(bars, sc)
                     self.minute_stats.setdefault(s, {}).update(  # keeps the order flow until it's topped up below
-                        qqe=self._qqe([b for b in bars if regular(b)], bars[-1].t.date()) if sc.qqe else [],
-                        rsi=rsi, trend=trend)
+                        self._overlays([b for b in bars if regular(b)], bars[-1].t.date()), rsi=rsi, trend=trend)
         self._publish_minutes(now)  # before the tape, which can take a while the first time
         if self.minute_flow is None:
             return
@@ -477,12 +495,76 @@ class Scanner:
                 [int(b.t.timestamp()), round(b.delta), round(b.cvd)] for b in fbars]} if fbars else None
         self._publish_minutes(now)
 
-    def _qqe(self, rth: list[Bar], day: date) -> list[dict]:
-        """The QQE signals on `day`, from regular-hours candles only, like an RTH chart; earlier sessions warm it up."""
+    def _deepen(self, syms: list[str], now: datetime) -> None:
+        """Once a day per symbol, the regular-hours candles of the last sessions: swings and order blocks reach further
+        back than the scan's three. Only the page's overlays use them, and a failed fetch costs only that."""
         sc = self.cfg.scan
-        return [{"t": int(rth[s.index].t.timestamp()), "side": s.side, "rsi": round(s.rsi, 1), "line": round(s.line, 1)}
-                for s in qqe([b.c for b in rth], sc.qqe_rsi_period, sc.qqe_smoothing, sc.qqe_factor)
-                if rth[s.index].t.date() == day]
+        key = (now.date(), sc.bar_minutes)
+        need = [s for s in syms if self.deep.get(s, (None,))[0] != key]
+        if self.state_path is None or not sc.smc or not need or sc.bar_minutes == 1:  # three sessions of 1-minute candles do
+            return
+        try:
+            got = self.source.chart_bars(need, sc.bar_minutes, weekdays_back(now, sc.history_sessions), False)
+        except Exception as e:
+            self.journal.log("history_failed", symbols=need, error=repr(e))
+            return
+        for s in need:
+            rows = [Bar(b.t.astimezone(now.tzinfo), b.o, b.h, b.l, b.c, b.v) for b in got.get(s, [])]
+            self.deep[s] = (key, [b for b in rows if b.t.date() < now.date() and regular(b)])
+
+    def _with_history(self, sym: str, rth: list[Bar]) -> list[Bar]:
+        earlier = self.deep.get(sym, (None, []))[1]
+        return [b for b in earlier if b.t < rth[0].t] + rth if rth else []
+
+    def _overlays(self, rth: list[Bar], day: date, since: date | None = None) -> dict:
+        """What the charts draw from `since` (or just `day`) to `day` besides the scanner's own signals: QQE, support and
+        resistance breaks, squeeze releases and smart money concepts, each if it's on. From regular-hours candles only,
+        like an RTH chart; the sessions before that warm them up."""
+        sc, out = self.cfg.scan, {}
+        since = since or day
+        drawn = [i for i, b in enumerate(rth) if since <= b.t.date() <= day]
+
+        def t(i: int) -> int:
+            return int(rth[i].t.timestamp())
+
+        def on_day(i: int) -> bool:
+            return since <= rth[i].t.date() <= day
+
+        if sc.qqe:
+            out["qqe"] = [{"t": t(s.index), "side": s.side, "rsi": round(s.rsi, 1), "line": round(s.line, 1),
+                           "gap": overnight_gap(rth, s.index)}
+                          for s in qqe([b.c for b in rth], sc.qqe_rsi_period, sc.qqe_smoothing, sc.qqe_factor) if on_day(s.index)]
+        if sc.sr_breaks:
+            levels = pivot_levels(rth, sc.sr_pivot_bars, sc.sr_pivot_bars)
+            out["sr"] = {
+                "breaks": [{"t": t(x.index), "side": x.side, "kind": x.kind, "level": round(x.level, 4), "vol": round(x.volume),
+                            "gap": x.gap, "open": round(rth[x.index].o, 4)}
+                           for x in level_breaks(rth, sc.sr_pivot_bars, sc.sr_pivot_bars, sc.sr_volume, levels) if on_day(x.index)],
+                "levels": [[t(i), *levels[i]] for n, i in enumerate(drawn) if n == 0 or levels[i] != levels[i - 1]]}
+        if sc.squeeze:
+            found, lasting = squeeze(rth, sc.squeeze_length, sc.squeeze_bb_mult, sc.squeeze_kc_mult)
+            out["sqz"] = {"on": lasting if drawn and rth[-1].t.date() == day else 0,
+                          "signals": [{"t": t(x.index), "side": x.side, "mom": round(x.momentum, 3), "candles": x.candles, "gap": x.gap}
+                                      for x in found if on_day(x.index)]}
+        if sc.smc and rth:
+            m = smart_money(rth, sc.smc_swing)
+            inner = [x for x in m.blocks if x.internal][:sc.smc_blocks]
+            outer = [x for x in m.blocks if not x.internal][:sc.smc_swing_blocks]
+            out["smc"] = {
+                "swing": m.swing_bias, "internal": m.internal_bias,
+                "structure": [{"from": t(x.pivot), "t": t(x.index), "level": round(x.level, 4), "side": x.side, "kind": x.kind,
+                               "internal": x.internal, "gap": x.gap} for x in m.structures if on_day(x.index)],
+                "blocks": [{"from": t(x.index), "top": round(x.top, 4), "bottom": round(x.bottom, 4), "side": x.side,
+                            "internal": x.internal} for x in outer + inner],
+                "equal": [{"from": t(x.first), "t": t(x.second), "levels": [round(v, 4) for v in x.levels], "side": x.side,
+                           "known": t(x.known)} for x in m.equals if on_day(x.known)],
+                "fvg": [{"from": t(x.index), "top": round(x.top, 4), "bottom": round(x.bottom, 4), "side": x.side}
+                        for x in m.gaps if on_day(x.index)][:10],
+                "range": {"top": round(m.top, 4), "bottom": round(m.bottom, 4), "topFrom": t(m.top_index),
+                          "bottomFrom": t(m.bottom_index), "from": t(m.range_index),
+                          "zones": {k: [round(v, 4) for v in z] for k, z in m.zones().items()}}
+                if m.top is not None and m.bottom is not None else None}
+        return out
 
     def _publish_minutes(self, now: datetime) -> None:
         """Write the 1-minute candles for the page's 1m charts."""
@@ -496,7 +578,7 @@ class Scanner:
             bars = [[int(t.timestamp()), b.o, b.h, b.l, b.c, b.v, 0 if regular(b) else 1]
                     for t, b in sorted(rows.items()) if t.date() == day]
             symbols[s] = {"bars": bars, "forming": self._forming_for(s, {"bars": bars}, self.minute_forming),
-                          "qqe": [], "rsi": None, "trend": None, "flow": None} | self.minute_stats.get(s, {})
+                          "rsi": None, "trend": None, "flow": None} | self.minute_stats.get(s, {})
         self._write(self.state_path.with_name("scan_chart_1m.json"),
                     {"updated": now.isoformat(), "bar_minutes": 1, "symbols": symbols})
 
@@ -662,7 +744,9 @@ def scan_forever(scanner: Scanner, send_alerts: bool = True, print_fn: Callable[
             try:
                 if bar != scanned_bar:  # a bar has closed since the last scan
                     # started between sessions: a scan just for the page and the log, as its signals are old
-                    print_fn(format_result(scanner.scan(send_alerts and (open_now or closing))))
+                    step = timedelta(minutes=minutes)
+                    missed = scanned_bar is not None and bar - scanned_bar > step and scanned_bar.date() == bar.date()
+                    print_fn(format_result(scanner.scan(send_alerts and (open_now or closing), scanned_bar - step if missed else False)))
                     scanned_bar = bar
                 elif tick and open_now:
                     print_fn(scanner.tick(send_alerts))
