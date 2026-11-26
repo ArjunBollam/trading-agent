@@ -3,12 +3,11 @@
 **An AI options-trading agent and a real-time chart-signal scanner, with a live web dashboard.**
 Paper trading only: no real money is ever at risk.
 
-![Dashboard: live 5-minute charts with buy and sell signals marked on the candles](docs/screenshots/dashboard.png)
+![SPY on a 1-minute chart with QQE, squeeze, support/resistance and smart money signals](docs/screenshots/chart.png)
 
-*The dashboard during a live session (Nov 16, 2026): every buy (green) and sell (red) signal is
-marked on the candle that triggered it, next to VWAP, high and low of day, prior-day and
-opening-range levels. Under each chart, the order-flow panel shows every candle's delta (bars) and
-the session's cumulative delta (blue line). The feed on the right explains each signal in plain words.*
+*SPY on a 1-minute chart, Nov 25, 2026: QQE (green and red) and squeeze (purple) signals on the candles that
+triggered them, smart money structure (BOS, CHoCH, equal highs and lows), demand zones in blue, VWAP in yellow, and
+the order-flow panel underneath: every candle's delta (bars) and the session's cumulative delta (blue line).*
 
 ## Highlights
 
@@ -28,14 +27,27 @@ the session's cumulative delta (blue line). The feed on the right explains each 
 - **QQE Long and QQE Short labels.** The QQE signal (a smoothed RSI crossing its volatility line, with the
   same RSI 14 / smoothing 5 / factor 4.238 settings as TradingView's "QQE signals" script) is drawn on
   every chart as its own labels, separate from the scanner's signals. Display only: never alerted or traded.
+- **Support / resistance breaks and squeezes.** Two more popular TradingView ideas, drawn the same way: pivot
+  levels with the candles that break them, and the release of a Bollinger / Keltner squeeze in the direction of
+  momentum. Each has its own on/off box. Written here from their published rules; display only.
+- **Smart money concepts.** Market structure on two scales (BOS and CHoCH), order blocks, equal highs and lows, strong
+  and weak highs and lows, premium and discount zones, and fair value gaps, each with its own box. Written here from
+  the published rules of the most-boosted script found on TradingView; display only.
+- **One chart, full page.** The corner icon on any chart (or its name) shows it alone: candle prices and indicator
+  readings at the top left, the countdown on the price label, quick ranges and a symbol switch. Esc goes back.
 - **1-minute and 5-minute charts.** A 1m / 5m switch above the charts changes every chart at once: the
-  candles, RSI, trend, QQE labels and order-flow panel. Signals and alerts stay on the scanner's own candles.
+  candles, RSI, trend, QQE, S/R, squeeze and smart money drawings, and order-flow panel. Signals and alerts stay on the scanner's own candles.
+- **A morning report every trading day.** At 10:00 AM Central the page alerts and opens a 4-hour chart
+  with the support to hold, bullish and bearish scenarios, and every level with the reason it's there. While open,
+  it shows live whether the support held and which targets were reached.
+- **Every signal audited, live.** A separate checker works out each signal again from the candles, compares
+  them with a second data source and flags anything wrong or missed within a minute.
 - **Context-aware phone alerts.** Each signal is checked against the slower trend and key price
   levels, then pushed to your phone, flagged when it goes against a position you hold.
 - **Any LLM, with automatic fallback.** Claude, Grok, Groq, Gemini or OpenRouter. When one model
   hits its rate limit or daily token budget, the next one answers.
 - **Built to be trusted.** Kill switches, a daily loss limit, runaway-order protection, a journal
-  of every decision, order and fill, and 307 tests that run against a fake broker and scripted AI
+  of every decision, order and fill, and 385 tests that run against a fake broker and scripted AI
   replies.
 
 **Tech:** Python 3.13 · LangGraph · Anthropic and OpenAI-compatible APIs · Alpaca API ·
@@ -49,20 +61,24 @@ Nothing here is financial advice, and no signal has a proven edge.
 
 ## Screenshots
 
-**Signals.** Every signal of the day: chart patterns, 14 order-flow setups and indicator events.
-Each row says what happened and whether it goes with or against your position.
+**Morning report.** The support to hold, the bullish and bearish scenarios with each level's reason, and a
+4-hour chart with its moving averages, trend lines and zones. Targets are ticked off as price reaches them.
+
+![Morning report: SPY's support to hold, scenarios and the 4-hour chart](docs/screenshots/report.png)
+
+**Signals.** Every signal of the day: chart patterns, order-flow setups and indicator events. Each row says
+what happened and whether it goes with or against your position.
 
 ![Signals: every signal with what happened](docs/screenshots/signals.png)
 
-**Patterns.** The full catalog, with each pattern set to alert, log only or off. Changes reach the
-running scanner within one check.
+**Audit.** Every signal checked again, once a minute: right, wrong, missed or loosely worded, whether the
+full-market candles agree, and what price did in the next 30 minutes.
 
-![Patterns: 116 chart patterns, each set to alert, log or off](docs/screenshots/patterns.png)
+![Audit: every signal checked, by indicator](docs/screenshots/audit.png)
 
-**Paper bot.** The control panel for the AI trading agent: kill switches, one-click commands, and
-the journal of every decision, order, fill and alert.
+**Paper bot.** The control panel for the AI trading agent: kill switches and one-click commands.
 
-![Paper bot: kill switch, commands and the event journal](docs/screenshots/paper-bot.png)
+![Paper bot: kill switches and commands](docs/screenshots/paper-bot.png)
 
 ## Quick start
 
@@ -506,6 +522,37 @@ and changes things only through the same files and commands, so the page, the co
 see one state. The live scanner must be running for the dashboard to move (the launchd job above). The page
 is for this computer only: it listens on 127.0.0.1, refuses other host names, and every change needs a token
 that's printed into the page when the server starts. The chart library comes from unpkg.com.
+
+**Morning report.** At 10:00 AM Central on trading days the page makes a report (`daily_report` in config.yaml: symbols, time)
+and shows an alert; the Report tab has it all: the support to hold, the bullish and bearish scenarios with their levels and the
+reason for each, what price has done at the support, and the 4-hour chart. It is worked out from 180 days of 4-hour candles
+around the clock: swing highs and lows on three timeframes, the last session's high, low and close, the overnight range,
+pivots, the 20 and 50 EMA, the 200 SMA, round numbers and trend lines; prices several of these share become one level. While
+the report is open the page says whether the support has held and which levels were reached. "Make a new one now" (or
+`paperbot outlook`) makes one at once; `paperbot outlook --at 2026-11-25T11:00` makes it as of then. If the page was off at
+10:00, the report is made when it starts, until 3:00 PM Central.
+
+It describes scenarios; it doesn't predict one. On 244 past SPY mornings (December 2025 to November 2026) the support held to the
+close 58% of the time and bounced 54% of the times it was touched; levels at random distances did 59% and 50%.
+
+**Signal audit.** `paperbot audit --live` (launchd job `com.paperbot.audit`) checks every signal once a minute while the
+scanner's sessions run: the scanner's own, its live crosses, and the QQE, S/R, Squeeze and Smart Money labels on the 1-minute
+and 5-minute charts. It is a separate, read-only process. For each one:
+
+1. Is it right? Worked out again from freshly downloaded candles cut at the signal's candle, and checked from its textbook
+   definition (`claims.py`) without the code that made it. Signals that should have fired and didn't, and labels that
+   disappear, are reported too.
+2. Does a second source agree? 16 minutes later, on Alpaca's full-market (SIP) candles.
+3. What happened next? How far price went its way after 15 and 30 minutes, beside what any candle that day did.
+
+The page's Audit tab and the charts' tooltips show the results, and a wrong signal alerts your phone (at most 10 messages a
+day). `paperbot audit` prints today's. Being right is about the calculation; it doesn't mean the signal pays. When the
+computer sleeps (the lid closed, say) the scanner stops: on waking it catches up on the candles it missed, for the charts
+and the log, and alerts only the latest.
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.paperbot.audit
+```
 
 A launchd job (`~/Library/LaunchAgents/com.paperbot.web.plist`) keeps the page up: it starts at login and
 restarts if it stops, so http://127.0.0.1:8765/ is always there. Its log is
