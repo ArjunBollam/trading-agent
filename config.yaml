@@ -186,6 +186,8 @@ scan:                             # `paperbot scan`: read-only chart signals on 
   qqe: true                       # QQE Long / QQE Short labels on the charts (shown only, never alerted)
   sr_breaks: true                 # support / resistance levels and their breaks (shown only)
   squeeze: true                   # squeeze releases (shown only)
+  line_keeper: true               # keep 1-minute trend lines drawn on your watchlist and held symbols, each minute
+                                  # (paperbot/linekeeper.py; ids auto1m-…; delete one and it stays deleted)
   smc: true                       # smart money concepts: structure, order blocks, zones (shown only)
 
   # The bigger picture: every signal is checked against the last few hours and a slower candle

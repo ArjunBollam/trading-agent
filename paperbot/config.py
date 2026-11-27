@@ -300,6 +300,9 @@ class ScanConfig(BaseModel):
     sr_pivot_bars: int = Field(15, ge=2, description="S/R breaks: candles on each side of a pivot high or low")
     sr_volume: float = Field(20.0, description="S/R breaks: how far (%) the fast volume average must be above the slow one")
     squeeze: bool = Field(True, description="Draw squeeze releases on the charts (shown only)")
+    line_keeper: bool = Field(True, description=(
+        "Keep 1-minute trend lines drawn on your watchlist and held symbols as the day goes on (the web page does it, each "
+        "minute; the position guard watches them)"))
     squeeze_length: int = Field(20, ge=5, description="Squeeze: candles in the bands, channels and momentum")
     squeeze_bb_mult: float = Field(1.5, gt=0, description=(
         "Squeeze: Bollinger Band width. 1.5 matches the script as published on TradingView; its author's fix is 2.0"))

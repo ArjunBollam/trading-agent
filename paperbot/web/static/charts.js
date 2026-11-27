@@ -1485,18 +1485,27 @@ async function ctdFetch(sym) {
   if (CT.lines[sym] === undefined) CT.lines[sym] = [];
   try {
     const got = (await api(`/api/drawings?symbol=${encodeURIComponent(sym)}`)).drawings;
-    if (CT.drag || CT.draft) return;
+    if (CT.drag || CT.draft || CT.savePending?.[sym]) return;
     CT.lines[sym] = got;
+    ctdSeenAuto(sym, got);
   } catch { /* keep what's shown */ }
   ctdRepaint(sym);
   for (const v of CT.views) if (v?.data && v.panel.symbol === sym) { ctPaintOverlays(v); ctLegend(v); } // their break and retest marks
+}
+
+// the 1-minute line keeper's lines (paperbot/linekeeper.py) as this page last loaded them: sent with each save, so the
+// server can tell a keeper line you moved or deleted from one this page just hadn't caught up with yet
+function ctdSeenAuto(sym, lines) {
+  CT.autoSeen ||= {};
+  CT.autoSeen[sym] = Object.fromEntries((lines || []).filter((d) => String(d.id).startsWith("auto1m-")).map((d) => [d.id, { ...d }]));
 }
 
 function ctdSave(sym) {
   clearTimeout(CT.saveTimers[sym]);
   const timer = setTimeout(async () => {
     try {
-      CT.lines[sym] = (await api("/api/drawings", { body: { symbol: sym, drawings: ctdLines(sym) } })).drawings;
+      CT.lines[sym] = (await api("/api/drawings", { body: { symbol: sym, drawings: ctdLines(sym), auto_seen: CT.autoSeen?.[sym] || {} } })).drawings;
+      ctdSeenAuto(sym, CT.lines[sym]);
     } catch (e) { toast("Couldn't save the lines: " + e.message, true); }
     ctdRepaint(sym);
     CT.savePending[sym] = false;

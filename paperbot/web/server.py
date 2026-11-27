@@ -49,6 +49,7 @@ from ..scanner import market_hours, next_scan_start, scan_hours, session_at
 from ..studies import catalog as study_catalog
 from ..trendlines import TICKER as LINE_TICKER
 from ..guard import Guard
+from .. import linekeeper
 from ..trendlines import Drawings
 from ..watchlists import Watchlists
 
@@ -499,12 +500,20 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
         return Drawings(c.log_dir / "drawings.json")
 
     async def drawings_view(request: Request) -> Response:
-        """A symbol's drawn lines: GET ?symbol=SPY, or POST {symbol, drawings} to replace them."""
+        """A symbol's drawn lines: GET ?symbol=SPY, or POST {symbol, drawings, auto_seen} to replace them. `auto_seen` is
+        the 1-minute line keeper's lines as the page last loaded them, so a stale copy doesn't undo the keeper's newest
+        (paperbot/linekeeper.py merge_page_save)."""
         c = cfg()
         if request.method == "POST":
             d = await body(request)
             try:
-                saved = drawings(c).save(str(d.get("symbol") or ""), d.get("drawings"), c.schedule.tz)
+                sym, posted = str(d.get("symbol") or ""), d.get("drawings")
+                with linekeeper.lock:
+                    if isinstance(posted, list) and LINE_TICKER.match(sym.strip().upper()):
+                        seen = d.get("auto_seen")
+                        posted = linekeeper.merge_page_save(drawings(c).get(sym), [x for x in posted if isinstance(x, dict)],
+                                                            seen if isinstance(seen, dict) else None)
+                    saved = drawings(c).save(sym, posted, c.schedule.tz)
             except ValueError as e:
                 return error(str(e))
             return JSONResponse({"symbol": str(d.get("symbol")).upper(), "drawings": saved})
@@ -700,7 +709,7 @@ def alert_checks(config_path: Path, sleep=time.sleep) -> None:
     from ..journal import Journal
     from ..notify import Alerts, build_channel
 
-    phone = None
+    phone, kept = None, {}
     while True:
         try:
             c = Config.load(config_path)
@@ -710,11 +719,27 @@ def alert_checks(config_path: Path, sleep=time.sleep) -> None:
             if phone is None:
                 journal = Journal(c.log_dir, lambda: datetime.now(c.schedule.tz))
                 phone = Alerts(build_channel(c.alerts, c.log_dir), c.alerts, journal, lambda: datetime.now(c.schedule.tz))
-            # the position guard: your positions (from the scanner) against the lines on their symbols, around the clock
             try:
                 state = json.loads((c.log_dir / "scan_state.json").read_text())
             except (OSError, ValueError):
                 state = {}
+            # the 1-minute line keeper: trend lines kept drawn on your watchlist and held symbols, once a minute, after the
+            # last minute's candle has settled (paperbot/linekeeper.py)
+            minute = now.replace(second=0, microsecond=0)
+            if c.scan.line_keeper and kept.get("minute") != minute and now.second >= 20 and alerting.checking_hours(now, True):
+                kept["minute"] = minute
+                held = [x["symbol"] for x in (state.get("holdings") or []) + (state.get("options") or []) if x.get("symbol")]
+                lists = Watchlists(c.log_dir / "watchlists.json", []).by_name()
+                syms = list(dict.fromkeys(s.upper() for s in held + [x for v in lists.values() for x in v]))[:8]
+                mk, keeper = market_for(c), linekeeper.LineKeeper(c.log_dir)
+                for sym in syms:
+                    try:
+                        bars = mk.night(sym, 1, 1) if mk.night_source is not None else mk.minutes(sym, 1)[0]
+                        for said in keeper.run(sym, bars, c.schedule.tz, now):
+                            print(f"{now:%H:%M:%S} lines: {said}", flush=True)
+                    except Exception as e:  # one symbol's candles failing doesn't stop the rest
+                        print(f"line keeper {sym}: {e!r}", flush=True)
+            # the position guard: your positions (from the scanner) against the lines on their symbols, around the clock
             if (state.get("holdings") or state.get("options")) and alerting.checking_hours(now, True):
                 m, lines_store = market_for(c), Drawings(c.log_dir / "drawings.json")
 

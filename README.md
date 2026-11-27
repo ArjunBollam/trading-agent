@@ -52,7 +52,7 @@ the order-flow panel underneath: every candle's delta (bars) and the session's c
 - **Any LLM, with automatic fallback.** Claude, Grok, Groq, Gemini or OpenRouter. When one model
   hits its rate limit or daily token budget, the next one answers.
 - **Built to be trusted.** Kill switches, a daily loss limit, runaway-order protection, a journal
-  of every decision, order and fill, and 478 tests that run against a fake broker and scripted AI
+  of every decision, order and fill, and 486 tests that run against a fake broker and scripted AI
   replies.
 
 **Tech:** Python 3.13 · LangGraph · Anthropic and OpenAI-compatible APIs · Alpaca API ·
@@ -625,6 +625,15 @@ still holding; the stop goes just past the opposing line.
   the line if you move it later.
 - **Auto trend lines**: lines through 3 or more swing highs or lows (3 candles each side) that no candle's wick goes past,
   within 0.15 ATR, labelled with their touches; resistance lines stop where a close broke them.
+- **1-minute line keeper** (`linekeeper.py`, `scan.line_keeper` in config.yaml): every minute, on your watchlist and the
+  symbols you hold, it draws the current falling line from the top of the leg through the latest lower swing high
+  (magenta), and the rising line under the swing lows (cyan). It only draws lines no close has gone through yet,
+  starting at most 45 minutes before their latest swing point and at least 8 minutes long. Each line is redrawn through
+  each new lower high (higher low) until a candle closes through it. Then it stays as it was, with its Break and Retest
+  marks, and the next line starts from a later swing point. The newest 3 on each side are kept. They're saved with your
+  lines (ids `auto1m-…`), so they show on the chart, can carry alerts, and the position guard counts them. A keeper
+  line you move or delete is left alone, and no other line is started from its first point. The page sends what it
+  last loaded with each save, so a copy up to 10 seconds old doesn't undo the keeper's newest lines.
 - **Risk**: shares or option contracts from your account size, risk % (1% to start), entry and stop; the stop starts just
   past the nearest line on the other side of price. Arithmetic only.
 - **Positions**: your Robinhood holdings (from the scanner) on that symbol's chart, at their average cost, and options at
