@@ -186,6 +186,16 @@ scan:                             # `paperbot scan`: read-only chart signals on 
   qqe: true                       # QQE Long / QQE Short labels on the charts (shown only, never alerted)
   sr_breaks: true                 # support / resistance levels and their breaks (shown only)
   squeeze: true                   # squeeze releases (shown only)
+  ai_monitor: true                # ask an AI every few minutes how the chart treats each position you hold
+                                  # (paperbot/coach.py; shown under the position, to the phone when its read turns)
+  ai_monitor_provider: groq       # groq (free tier, GROQ_API_KEY) | gemini (free tier, GEMINI_API_KEY) |
+                                  # openrouter (":free" models) | anthropic (Claude, billed) | xai (Grok, billed)
+  ai_monitor_model: openai/gpt-oss-20b   # the trading bot leads with gpt-oss-120b, so the reads don't eat its quota
+  ai_monitor_fallback_models: [qwen/qwen3.8-27b]   # once a model's daily allowance is used up
+  ai_monitor_daily_tokens: 120000 # per free model per day (Groq allows ~200K; a read is ~4,500)
+  ai_monitor_minutes: 10          # minutes between reads of a symbol (sooner after an EXIT / against / with / target)
+  ai_monitor_effort: low          # how hard the model thinks: low | medium | high (xhigh | max for Claude); low
+                                  # leaves room in Groq's free 8,000 tokens a minute
   line_keeper: true               # keep 1-minute trend lines drawn on your watchlist and held symbols, each minute
                                   # (paperbot/linekeeper.py; ids auto1m-…; delete one and it stays deleted)
   smc: true                       # smart money concepts: structure, order blocks, zones (shown only)

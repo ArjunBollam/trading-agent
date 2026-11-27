@@ -300,6 +300,21 @@ class ScanConfig(BaseModel):
     sr_pivot_bars: int = Field(15, ge=2, description="S/R breaks: candles on each side of a pivot high or low")
     sr_volume: float = Field(20.0, description="S/R breaks: how far (%) the fast volume average must be above the slow one")
     squeeze: bool = Field(True, description="Draw squeeze releases on the charts (shown only)")
+    ai_monitor: bool = Field(True, description=(
+        "Ask an AI every few minutes of regular hours how the chart is treating each position you hold (Groq's free "
+        "tier by default; Claude is billed per read)"))
+    ai_monitor_provider: Literal["groq", "anthropic", "gemini", "openrouter", "xai"] = Field(
+        "groq", description="Which AI reads the charts: groq, gemini and openrouter have free tiers; anthropic (Claude) "
+                            "and xai (Grok) bill per read. Its key goes in .env")
+    ai_monitor_model: str = Field("openai/gpt-oss-20b", description="The model that reads the charts")
+    ai_monitor_fallback_models: list[str] = Field(
+        ["qwen/qwen3.8-27b"], description="Same provider, used in turn once a model's daily allowance is used up")
+    ai_monitor_daily_tokens: int = Field(
+        120000, ge=10000, description="Tokens a day the reads may use on each free model (Groq allows ~200K; the "
+                                      "rest is left for the trading bot's fallbacks)")
+    ai_monitor_minutes: int = Field(10, ge=2, le=60, description="Minutes between reads of a symbol you hold")
+    ai_monitor_effort: Literal["low", "medium", "high", "xhigh", "max"] = Field(
+        "medium", description="How hard the model thinks on each read (higher uses more tokens)")
     line_keeper: bool = Field(True, description=(
         "Keep 1-minute trend lines drawn on your watchlist and held symbols as the day goes on (the web page does it, each "
         "minute; the position guard watches them)"))

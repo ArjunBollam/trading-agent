@@ -473,3 +473,15 @@ nav .dot[hidden] { display: none; }
 .ct-verdict.hold { background: #2962ff; }
 .ct-verdict.hold.near { background: #ff9800; }
 .ct-verdict.exit { background: #f23645; }
+
+/* Claude's read on a position, in the positions card */
+.ct-ai { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--line); }
+.ct-ai-tag { display: inline-block; padding: 1px 6px; border-radius: 4px; font-weight: 700; font-size: 11px; background: #434651; color: #fff; }
+.ct-ai-tag.favors { background: #089981; }
+.ct-ai-tag.against { background: #f23645; }
+.ct-ai-tag.mixed { background: #787b86; }
+.ct-ai-head { margin: 3px 0; font-weight: 600; }
+.ct-ai ul { margin: 0; padding-left: 2px; list-style: none; }
+.ct-ai li.for { color: #26a69a; }
+.ct-ai li.against { color: #ef5350; }
+.ct-ai-more { line-height: 1.4; }

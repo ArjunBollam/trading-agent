@@ -52,7 +52,7 @@ the order-flow panel underneath: every candle's delta (bars) and the session's c
 - **Any LLM, with automatic fallback.** Claude, Grok, Groq, Gemini or OpenRouter. When one model
   hits its rate limit or daily token budget, the next one answers.
 - **Built to be trusted.** Kill switches, a daily loss limit, runaway-order protection, a journal
-  of every decision, order and fill, and 486 tests that run against a fake broker and scripted AI
+  of every decision, order and fill, and 504 tests that run against a fake broker and scripted AI
   replies.
 
 **Tech:** Python 3.13 · LangGraph · Anthropic and OpenAI-compatible APIs · Alpaca API ·
@@ -625,6 +625,27 @@ still holding; the stop goes just past the opposing line.
   the line if you move it later.
 - **Auto trend lines**: lines through 3 or more swing highs or lows (3 candles each side) that no candle's wick goes past,
   within 0.15 ATR, labelled with their touches; resistance lines stop where a close broke them.
+- **The AI's read** (`coach.py`, `scan.ai_monitor*` in config.yaml). Every 10 minutes of regular hours, and within
+  90 seconds of an EXIT, Against you, With you or Target from the guard, each symbol you hold goes to an AI.
+  - **Which AI:** Groq's free tier by default, on the same `GROQ_API_KEY` as the trading bot. It uses `gpt-oss-20b`,
+    then `qwen3.8-27b`, each capped at 120,000 tokens a day so the bot's own fallbacks keep their quota; the bot
+    leads with `gpt-oss-120b`. A read is about 5,000 tokens. Gemini or OpenRouter (free tiers), or Claude or Grok
+    (billed), are one setting away (`ai_monitor_provider`), with that provider's key in `.env`.
+  - **What it sees:** the last hour of 1-minute candles, two hours of 5-minute candles, the 10 nearest lines with
+    today's break or retest, today's QQE, squeeze, S/R and structure signals, order flow, the scanner's named levels and
+    bigger-picture reasons, the last half hour's phone alerts and guard events, and each position with its P&L and the
+    guard's verdict.
+  - **What it answers:** for each position, whether the chart favors it, goes against it or is mixed. Each point is
+    tied to the candle that shows it. It also gives the patterns it sees and the prices that would change the read.
+  - **How it's checked:** a point is dropped if it cites a candle the AI wasn't given, gives a close that isn't that
+    candle's close, or says "above" or "below" when its own numbers say otherwise. Groq's first live read said "closed
+    726.57 below 726.31"; that point was dropped. Patterns between candles that aren't there, prices outside the day's
+    range, and positions you don't hold are dropped too. The page shows how many were dropped.
+  - **Where it shows:** under each position in the positions card, with today's reads. It goes to your phone when a
+    position's lean changes (high priority when it turns against you) and in the guard's HOLD check-ins.
+  - **Limits:** the AI is told to describe the chart, not to tell you to buy or sell. A new or replaced key in `.env`
+    counts within 15 seconds, with no restart. After an error (no credit, a refused key, a rate limit), it waits
+    before trying again.
 - **1-minute line keeper** (`linekeeper.py`, `scan.line_keeper` in config.yaml): every minute, on your watchlist and the
   symbols you hold, it draws the current falling line from the top of the leg through the latest lower swing high
   (magenta), and the rising line under the swing lows (cyan). It only draws lines no close has gone through yet,

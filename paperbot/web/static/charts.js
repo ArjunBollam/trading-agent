@@ -1713,16 +1713,66 @@ function ctgCard() {
         (p.against ? `<div>${p.bullish === false ? "Ceiling" : "Floor"}: ${ctgLine(p.against)}</div>`
           : `<div>No line ${p.bullish === false ? "over" : "under"} the trade</div>`) +
         (p.ahead ? `<div>Target: ${ctgLine(p.ahead)}</div>` : "") +
-        (p.expires_today ? `<div><b>Expires today</b>${p.close ? `: market closes ${esc(p.close)} ET` : ""}</div>` : "") + `</div>`;
-    }).join("") +
+        (p.expires_today ? `<div><b>Expires today</b>${p.close ? `: market closes ${esc(p.close)} ET` : ""}</div>` : "") +
+        ctgClaude(p) + `</div>`;
+    }).join("") + ctgClaudeSymbols(mine) +
     (recent ? `<div class="ct-guard-msg ${CTG_LOOK[recent.kind].cls}"><b>${esc(CTG_LOOK[recent.kind].name)}</b>: ${esc(recent.text)}</div>` : "") +
     (lastHold ? `<div class="muted" title="${esc(lastHold.text)}">Last HOLD check-in ${esc(etTime(new Date(lastHold.at)))} ET (hover to read it); one every 15 minutes, to your phone too</div>` : "");
+}
+
+// the AI's read on a position (paperbot/coach.py; Groq's free tier or Claude): favors / against / mixed, the headline,
+// and each point with the candle that shows it; every point was checked against the candles the AI was given
+const CTC_LEAN = { favors: ["Favors", "favors"], against: ["Against", "against"], mixed: ["Mixed", "mixed"] };
+function ctgClaude(p) {
+  const read = CT.coach?.symbols?.[p.symbol];
+  const mine = read?.positions?.find((x) => x.position === p.position);
+  if (!mine) return "";
+  const look = CTC_LEAN[mine.lean] || [mine.lean, ""];
+  return `<div class="ct-ai ${look[1]}"><div><span class="ct-ai-tag ${look[1]}">${esc(read.by || "Claude")}: ${esc(look[0])}</span> ` +
+    `<span class="muted">${esc(mine.confidence)} confidence · ${esc(etTime(new Date(read.at)))} ET · ` +
+    `${esc(String(read.model || "").replace(/^.*\//, ""))}</span></div>` +
+    `<div class="ct-ai-head">${esc(mine.headline)}</div>` +
+    `<ul>${mine.points.map((x) => `<li class="${x.side}">${x.side === "for" ? "✓" : "✗"} ${esc(x.text)}` +
+      (x.candle ? ` <span class="muted">(${esc(x.candle)})</span>` : "") + `</li>`).join("")}</ul></div>`;
+}
+
+// per symbol held: the patterns Claude sees and the prices that would change its read; then today's reads and cost
+function ctgClaudeSymbols(mine) {
+  const c = CT.coach;
+  if (!c) return "";
+  let out = "";
+  for (const sym of [...new Set(mine.map((p) => p.symbol))]) {
+    const read = c.symbols?.[sym];
+    if (!read) continue;
+    if (read.patterns?.length) out += `<div class="ct-ai-more"><b>${esc(sym)} patterns:</b> ` + read.patterns.map((x) =>
+      `${esc(x.name)} <span class="muted">${esc(x.from)}–${esc(x.to)}</span>: ${esc(x.meaning)}`).join("; ") + `</div>`;
+    if (read.watch?.length) out += `<div class="ct-ai-more"><b>Watch:</b> ` + read.watch.map((x) =>
+      `<b>${num(x.price)}</b> ${esc(x.why)}`).join("; ") + `</div>`;
+  }
+  const s = c.spend || {};
+  const bits = [];
+  if (c.status) bits.push(`<span class="err-text">${esc(c.status)}</span>`);
+  const by = Object.values(c.symbols || {})[0];
+  if (s.reads) bits.push(`AI reads today: ${s.reads}` + (by?.free ? ` (free on ${esc(by.by)})` : `, about $${Number(s.usd).toFixed(2)}`));
+  const dropped = Object.values(c.symbols || {}).reduce((n, r) => n + (r.dropped || 0), 0);
+  if (dropped) bits.push(`${dropped} point${dropped === 1 ? "" : "s"} dropped: they didn't check out against the candles`);
+  return out + (bits.length ? `<div class="muted">${bits.join(" · ")}</div>` : "");
 }
 
 async function ctgPoll() {
   if (document.hidden) return;
   let g;
   try { g = await api("/api/guard"); } catch { return; }
+  try {
+    const c = await api("/api/coach");
+    for (const [sym, read] of Object.entries(c.symbols || {})) { // a lean that changed: say so on the page too
+      for (const p of read.positions || []) {
+        const was = CT.coach?.symbols?.[sym]?.positions?.find((x) => x.position === p.position);
+        if (was && was.lean !== p.lean) toast(`${read.by || "Claude"}: ${sym} ${p.lean} for ${p.position}: ${p.headline}`, p.lean === "against");
+      }
+    }
+    CT.coach = c;
+  } catch { /* the guard's card still shows */ }
   const before = new Set((CT.guard?.events || []).map((e) => `${e.at}|${e.line}|${e.kind}`));
   const fresh = CT.guard ? (g.events || []).filter((e) => !before.has(`${e.at}|${e.line}|${e.kind}`) && CTG_LOOK[e.kind]) : [];
   CT.guard = g;

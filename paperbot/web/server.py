@@ -50,6 +50,7 @@ from ..studies import catalog as study_catalog
 from ..trendlines import TICKER as LINE_TICKER
 from ..guard import Guard
 from .. import linekeeper
+from ..coach import Coach
 from ..trendlines import Drawings
 from ..watchlists import Watchlists
 
@@ -520,6 +521,10 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
         sym = (request.query_params.get("symbol") or "").upper()
         return JSONResponse({"symbol": sym, "drawings": drawings(c).get(sym) if sym else []})
 
+    async def coach_view(request: Request) -> Response:
+        """Claude's latest read on each symbol you hold (paperbot/coach.py)."""
+        return JSONResponse(Coach(cfg().log_dir).load())
+
     async def guard_view(request: Request) -> Response:
         """The position guard: each position's line under it and ahead of it, and what broke (paperbot/guard.py)."""
         g = Guard(cfg().log_dir).load()
@@ -629,6 +634,7 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
         Route("/api/chart-data", chart_data, methods=["POST"]),
         Route("/api/studies", studies_view),
         Route("/api/guard", guard_view),
+        Route("/api/coach", coach_view),
         Route("/api/drawings", drawings_view, methods=["GET", "POST"]),
         Route("/api/watchlists", watchlists_view, methods=["GET", "POST"]),
         Route("/api/quotes", quotes, methods=["POST"]),
@@ -748,8 +754,11 @@ def alert_checks(config_path: Path, sleep=time.sleep) -> None:
                         return m.night(sym, 1, 1)
                     return m.minutes(sym, 1)[0]
 
+                from ..coach import note_for
+
                 for e in Guard(c.log_dir).run(state, candles, lines_store.get, c.schedule.tz, now,
-                                              lambda title, msg, pri: phone.send(title, msg, pri), today_close(now)):
+                                              lambda title, msg, pri: phone.send(title, msg, pri), today_close(now),
+                                              lambda sym, label: note_for(c.log_dir, sym, label, now)):
                     print(f"{now:%H:%M:%S} guard: {e['text']}", flush=True)
             if active and alerting.checking_hours(now, any(a.get("session") == "24h" for a in active)):
                 lists = Watchlists(c.log_dir / "watchlists.json", []).by_name()
@@ -762,6 +771,143 @@ def alert_checks(config_path: Path, sleep=time.sleep) -> None:
         sleep(15)
 
 
+def ai_checks(config_path: Path, sleep=time.sleep) -> None:
+    """An AI's read on each symbol you hold, every few minutes of regular hours and soon after the guard flags
+    something (paperbot/coach.py): Groq's free tier by default, or Claude. Its own thread: a read takes seconds, and the
+    guard's 15-second checks don't wait."""
+    from ..coach import PROVIDER_LABELS, ClaudeReader, CoachError, OpenAIReader, context
+    from ..config import load_dotenv
+    from ..guard import regular_now
+    from ..journal import Journal
+    from ..llm import OPENAI_COMPATIBLE
+    from ..notify import Alerts, build_channel
+
+    phone, clients = None, {}
+    while True:
+        try:
+            c = Config.load(config_path)
+            sc, tz = c.scan, c.schedule.tz
+            coach = Coach(c.log_dir)
+            now = datetime.now(tz)
+            guard = Guard(c.log_dir).load()
+            held = [p for p in guard.get("positions") or [] if not p.get("error") and p.get("verdict")]
+            if not sc.ai_monitor or not held or not regular_now(now, today_close(now)):
+                sleep(15)
+                continue
+            provider = sc.ai_monitor_provider
+            label = PROVIDER_LABELS.get(provider, provider)
+            env_name = "ANTHROPIC_API_KEY" if provider == "anthropic" else OPENAI_COMPATIBLE[provider].key_env
+            load_dotenv(Path(config_path).parent / ".env")  # a key added since start-up counts at once
+            key = _env_value(Path(config_path).parent / ".env", env_name)
+            if key and key != os.environ.get(env_name):  # and so does a replaced one (keys expire)
+                os.environ[env_name] = key
+                clients.pop(provider, None)
+                coach.status(None)
+            if not os.environ.get(env_name):
+                coach.status(f"Add your {label} API key to .env ({env_name}=...) to turn on the AI's read.")
+                sleep(30)
+                continue
+            if coach.waiting(now):  # after an error (no credit, a bad key, rate limits), not every 15 seconds
+                sleep(15)
+                continue
+            if provider == "anthropic":
+                models = [sc.ai_monitor_model]
+                model = sc.ai_monitor_model
+            else:  # a free tier: the first model with allowance left today
+                models = list(dict.fromkeys([sc.ai_monitor_model, *sc.ai_monitor_fallback_models]))
+                model = coach.usable(models, now, sc.ai_monitor_daily_tokens)
+                if model is None:
+                    coach.status(f"Today's free {label} allowance for the chart reads is used up ({', '.join(models)}); "
+                                 "they start again tomorrow.", 1800, now)
+                    sleep(15)
+                    continue
+            if provider not in clients:
+                if provider == "anthropic":
+                    import anthropic
+
+                    clients[provider] = anthropic.Anthropic(timeout=120.0, max_retries=2)
+                else:
+                    import openai
+
+                    clients[provider] = openai.OpenAI(base_url=OPENAI_COMPATIBLE[provider].base_url,
+                                                      api_key=os.environ[env_name], timeout=120.0, max_retries=1)
+            reader = (ClaudeReader(clients[provider], model, sc.ai_monitor_effort) if provider == "anthropic"
+                      else OpenAIReader(clients[provider], provider, model, sc.ai_monitor_effort))
+            if phone is None:
+                journal = Journal(c.log_dir, lambda: datetime.now(tz))
+                phone = Alerts(build_channel(c.alerts, c.log_dir), c.alerts, journal, lambda: datetime.now(tz))
+            try:
+                state = json.loads((c.log_dir / "scan_state.json").read_text()).get("symbols") or {}
+            except (OSError, ValueError):
+                state = {}
+            try:
+                charts = json.loads((c.log_dir / "scan_chart_1m.json").read_text()).get("symbols") or {}
+            except (OSError, ValueError):
+                charts = {}
+            for sym in dict.fromkeys(p["symbol"] for p in held):
+                why = coach.due(sym, now, sc.ai_monitor_minutes, guard.get("events") or [])
+                if not why:
+                    continue
+                mine = [p for p in held if p["symbol"] == sym]
+                mk = market_for(c)
+                bars = mk.night(sym, 1, 1) if mk.night_source is not None else mk.minutes(sym, 1)[0]
+                bars = [b for b in bars if b.t + timedelta(minutes=1, seconds=20) <= now]  # settled candles only
+                if len(bars) < 30:
+                    continue
+                half_hour = now.timestamp() - 1800
+                events = [e for e in guard.get("events") or [] if e.get("symbol") == sym and e.get("kind") != "hold"
+                          and e["t"] >= half_hour]
+                alerts = [e for e in _journal_today(c.log_dir, now) if e.get("event") == "alert" and sym in str(e.get("title"))
+                          and datetime.fromisoformat(e["ts"]).timestamp() >= half_hour
+                          and not str(e.get("title", "")).startswith(("HOLD", *PROVIDER_LABELS.values()))]
+                text, allowed, span = context(sym, mine, bars, state.get(sym), charts.get(sym),
+                                              Drawings(c.log_dir / "drawings.json").get(sym), events, alerts, now,
+                                              today_close(now), tz)
+                try:
+                    read = coach.run(sym, mine, text, allowed, span, reader, now, why,
+                                     lambda title, msg, pri: phone.send(title, msg, pri))
+                    print(f"{now:%H:%M:%S} {label} {model}: {sym} ({why}): " + "; ".join(
+                        f"{p['position']} {p['lean']}" for p in read["positions"]) +
+                        f" ({sum(read['usage'].values())} tokens, ${read['usd']:.3f})", flush=True)
+                except CoachError as e:
+                    if e.spent:  # that model's free day is over: the next one takes the next pass
+                        coach.mark_spent(e.spent, now)
+                    else:
+                        coach.status(str(e), e.wait, now)
+                    print(f"{now:%H:%M:%S} {label} {model}: {sym}: {e}", flush=True)
+                    break
+        except Exception as e:  # nothing here may stop the page
+            print(f"AI read failed: {e!r}", flush=True)
+        sleep(15)
+
+
+def _env_value(path: Path, name: str) -> str:
+    """One value from .env as it is now ("" if it isn't there)."""
+    try:
+        for line in Path(path).read_text().splitlines():
+            k, _, v = line.strip().partition("=")
+            if k.strip() == name:
+                return v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+def _journal_today(folder: Path, now: datetime) -> list[dict]:
+    """Today's journal lines (logs/YYYY-MM-DD.jsonl), the last 2,000."""
+    try:
+        lines = (Path(folder) / f"{now.date().isoformat()}.jsonl").read_text().splitlines()[-2000:]
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out
+
+
 def serve(config_path: Path, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False) -> None:
     import uvicorn
 
@@ -770,6 +916,7 @@ def serve(config_path: Path, host: str = "127.0.0.1", port: int = 8765, open_bro
     app = create_app(config_path)
     threading.Thread(target=morning_reports, args=(Path(config_path).resolve(),), daemon=True).start()
     threading.Thread(target=alert_checks, args=(Path(config_path).resolve(),), daemon=True).start()
+    threading.Thread(target=ai_checks, args=(Path(config_path).resolve(),), daemon=True).start()
     url = f"http://127.0.0.1:{port}/"
     print(f"paperbot web: {url}  (this computer only; Ctrl-C to stop)", flush=True)
     if open_browser:

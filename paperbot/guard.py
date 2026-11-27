@@ -233,9 +233,11 @@ class Guard:
         except (OSError, ValueError):
             return {"updated": None, "positions": [], "events": [], "seen": []}
 
-    def run(self, state: dict, candles, drawings, tz, now: datetime, send=None, close_at: datetime | None = None) -> list[dict]:
+    def run(self, state: dict, candles, drawings, tz, now: datetime, send=None, close_at: datetime | None = None,
+            note=None) -> list[dict]:
         """One pass: `candles(symbol)` gives 1-minute candles, `drawings(symbol)` the saved lines, `close_at` today's
-        close from the exchange calendar (None: unknown, 16:00 assumed for check-ins). Returns new events."""
+        close from the exchange calendar (None: unknown, 16:00 assumed for check-ins), `note(symbol, position)` words
+        added to a HOLD check-in (Claude's latest read, paperbot/coach.py). Returns new events."""
         saved = self.load()
         seen = set(saved.get("seen") or [])
         broken = dict(saved.get("broken") or {})  # position -> the EXIT it's still under: {"line", "name", "t"}
@@ -282,8 +284,9 @@ class Guard:
             if (status["verdict"]["kind"] == "hold" and fresh and regular_now(now, close_at)
                     and checkins.get(pos.key) != slot and not (pos.expiration and pos.expiration < now.date())):
                 checkins[pos.key] = slot
+                extra = note(pos.symbol, pos.label) if note else ""
                 events.append({"kind": "hold", "line": status["against"]["id"], "t": status["t"],
-                               "text": status["verdict"]["text"]})
+                               "text": status["verdict"]["text"] + (extra or "")})
             withs, holds = [], []
             for e in events:
                 key = f"{pos.key}|{e['line']}|{e['kind']}|{e['t']}"
