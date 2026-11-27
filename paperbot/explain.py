@@ -245,6 +245,22 @@ EXPLAIN: dict[str, tuple[str, str]] = {
         "Price fell between two parallel falling lines and has now closed through one. Through the upper line, "
         "the downtrend broke; through the lower line, it's speeding up.",
         "Highs fall 102, 101, 100 and lows 101, 100, 99; a candle closes at 100.30, above the upper line at 99.80."),
+    "vwap_coil_breakout": (
+        "Price spent an hour or so in a tight box with VWAP running flat through the middle of it, on volume well "
+        "under the morning's, often with lower highs pressing into a flat floor after a flush. Then a candle closed "
+        "above the box and VWAP on heavier volume. Sellers who leaned on the floor are trapped above their stops, "
+        "and the quiet range gives a clear stop (under the box) and a measured target (the structure's height "
+        "added to the break).",
+        "After a drop to 95.50, highs fall 100.50, 99.80, 99.60 while lows hold 97.50; for 80 minutes it trades "
+        "97.40-99.70 around VWAP 98.60 on half the morning's volume, then a candle closes at 100.10 on 1.3x the "
+        "box's volume. Stop under 97.40, target 99.70 + 5.00 = 104.70."),
+    "vwap_coil_breakdown": (
+        "The mirror image: a tight box around a flat VWAP on drying volume, often with higher lows pressing into a "
+        "flat ceiling after a spike up, then a candle closed below the box and VWAP on heavier volume. Buyers who "
+        "bought the floor are trapped under their entries; the stop goes over the box.",
+        "After a pop to 104.50, lows rise 99.50, 100.20, 100.40 under a 102.50 ceiling; for an hour it trades "
+        "100.30-102.60 around VWAP 101.40 on half the morning's volume, then a candle closes at 99.90. Stop over "
+        "102.60, target 100.30 - 5.00 = 95.30."),
     "rectangle": (
         "Price bounced between a flat ceiling and a flat floor (a trading range), then closed through one of "
         "them. The side it breaks shows which group won.",

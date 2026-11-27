@@ -305,6 +305,9 @@ def faults(kind: str, side: str, price: float, detail: str, level: str | None, b
 
     need(abs(last.c - price) <= max(CENT, 0.0005 * last.c), f"the candle closed at {last.c:.2f}, not {price:.2f}")
 
+    if kind in ("vwap_coil_breakout", "vwap_coil_breakdown"):
+        return out + _coil(kind, detail, today, cfg, off)
+
     if kind.startswith("vwap_"):
         vw = vwaps(today)
         if len(vw) < 2 or vw[-1] is None or vw[-2] is None:
@@ -492,6 +495,44 @@ def faults(kind: str, side: str, price: float, detail: str, level: str | None, b
 
     shape = _candle(kind, detail, _Candles(bars, atr))
     return None if shape is None else out + shape
+
+
+def _coil(kind: str, detail: str, today: list[Bar], cfg: ScanConfig, off: float) -> list[str]:
+    """A VWAP coil break: the box is the low and high of the candles it names, VWAP runs through it, its volume is the
+    share of the morning's it says, and the last candle closed out of it, past VWAP, from inside."""
+    m = re.search(r"coiled ([\d.]+)-([\d.]+) around a flat VWAP ([\d.]+) for \d+ min \((\d\d:\d\d)-(\d\d:\d\d)\)", detail)
+    if not m or len(today) < 3:
+        return ["wording: the text doesn't name the box"]
+    lo, hi, said_vw = float(m.group(1)), float(m.group(2)), float(m.group(3))
+    t0, t1 = m.group(4), m.group(5)
+    box = [b for b in today[:-1] if regular(b) and t0 <= f"{b.t:%H:%M}" <= t1]
+    out: list[str] = []
+    if len(box) < cfg.coil_min_bars:
+        return [f"the box has {len(box)} candles, fewer than {cfg.coil_min_bars}"]
+    if abs(min(b.l for b in box) - lo) > CENT:
+        out.append(f"the box's low was {min(b.l for b in box):.2f}, not {lo:.2f}")
+    if abs(max(b.h for b in box) - hi) > CENT:
+        out.append(f"the box's high was {max(b.h for b in box):.2f}, not {hi:.2f}")
+    vw = vwaps(today)
+    last, prev = today[-1], today[-2]
+    if vw[-1] is not None and abs(vw[-1] - said_vw) > off:
+        out.append(f"VWAP was {vw[-1]:.2f}, not {said_vw:.2f}")
+    end_vw = vw[today.index(box[-1])]
+    if end_vw is not None and not min(b.l for b in box) < end_vw < max(b.h for b in box):
+        out.append(f"VWAP {end_vw:.2f} wasn't inside the box when it ended")
+    up = kind == "vwap_coil_breakout"
+    edge = max(b.h for b in box) if up else min(b.l for b in box)
+    if vw[-1] is not None and not ((last.c > edge and last.c > vw[-1]) if up else (last.c < edge and last.c < vw[-1])):
+        out.append(f"it closed at {last.c:.2f}, not {'above' if up else 'below'} both the box {edge:.2f} and VWAP {vw[-1]:.2f}")
+    if box[-1] is prev and not ((prev.c <= edge) if up else (prev.c >= edge)):
+        out.append(f"the candle before closed at {prev.c:.2f}, already out of the box")
+    before = [b.v for b in today if regular(b) and f"{b.t:%H:%M}" < t0]
+    said_dry = _num(r"on ([\d.]+)x the volume before it", detail)
+    if before and sum(before) and said_dry is not None:
+        real = statistics.fmean(b.v for b in box) / statistics.fmean(before)
+        if abs(real - said_dry) > 0.02:
+            out.append(f"the box traded {real:.2f}x the volume before it, not {said_dry:.2f}x")
+    return out
 
 
 def _volume(detail: str, bars: list[Bar]) -> list[str]:

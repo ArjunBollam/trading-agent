@@ -3,7 +3,9 @@
 It reads what the other processes write (the scanner's state file, the journal, the kill-switch files)
 and changes things only through the same files and commands the command line uses, so the page, the
 command line and an AI tool all see one state. It never talks to Robinhood itself, except by running
-the read-only `paperbot scan` command when asked.
+the read-only `paperbot scan` command when asked. The Charts tab and the alerts read market data (candles and trades,
+read-only) from Alpaca, and overnight (24-hour market) candles from Robinhood with the scanner's sign-in, borrowed
+read-only: it never signs in or renews it.
 
 Local only: it listens on 127.0.0.1, rejects other Host headers (DNS rebinding), and every change
 (POST) needs the token printed into the page at start, which another website can't read or send.
@@ -20,7 +22,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -32,7 +34,10 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from .. import explain, formations, outlook
+from starlette.concurrency import run_in_threadpool
+
+from .. import alerts as alerting
+from .. import chartdata, explain, formations, outlook
 from ..config import Config, ScanConfig
 from ..features import Bar
 from ..journal import Journal
@@ -41,6 +46,11 @@ from ..overrides import NOT_HERE, Overrides
 from ..patterns import LABELS
 from ..risk import KillSwitch
 from ..scanner import market_hours, next_scan_start, scan_hours, session_at
+from ..studies import catalog as study_catalog
+from ..trendlines import TICKER as LINE_TICKER
+from ..guard import Guard
+from ..trendlines import Drawings
+from ..watchlists import Watchlists
 
 STATIC = Path(__file__).parent / "static"
 
@@ -83,10 +93,29 @@ COMMANDS = {
 }
 
 
+def market_for(c: Config, held: dict = {}):  # noqa: B006 - one Market (and its cache) per process
+    """Alpaca market data for the charts and alerts, made the first time it's needed."""
+    if "market" not in held:
+        from ..market import AlpacaMarket, Market
+
+        night = None
+        if os.environ.get("ROBINHOOD_MCP_URL"):
+            from ..robinhood import RobinhoodMCP
+
+            # the overnight (24-hour market) candles: the scanner's Robinhood sign-in, borrowed read-only, never renewed here
+            night = RobinhoodMCP(os.environ["ROBINHOOD_MCP_URL"], c.scan.oauth_callback_port, borrow=True)
+        held["market"] = Market(AlpacaMarket(os.environ.get("ALPACA_API_KEY", ""), os.environ.get("ALPACA_SECRET_KEY", "")), c.schedule.tz,
+                                night_source=night)
+    return held["market"]
+
+
 def create_app(config_path: Path, token: str | None = None, timeout: float = 300,
-               hosts: tuple[str, ...] = ("127.0.0.1", "localhost")) -> Starlette:
+               hosts: tuple[str, ...] = ("127.0.0.1", "localhost"), market=None) -> Starlette:
     config_path = Path(config_path).resolve()
     token = token or secrets.token_urlsafe(24)
+
+    def data(c: Config):
+        return market if market is not None else market_for(c)
 
     def cfg() -> Config:
         return Config.load(config_path)  # read fresh: config.yaml may have been edited
@@ -445,6 +474,127 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
         """What every signal kind means, with an example, for the chart and list tooltips."""
         return JSONResponse(glossary)
 
+    # --- the Charts tab: candles, indicators, watchlists and alerts (Alpaca market data, read-only) ---
+
+    def watchlists(c: Config) -> Watchlists:
+        return Watchlists(c.log_dir / "watchlists.json", live_list(c).info().get("symbols") or ["SPY"])
+
+    async def chart_data(request: Request) -> Response:
+        c = cfg()
+        try:
+            req = chartdata.ChartRequest.from_json(await body(request))
+            lines = drawings(c).get(req.symbol) if LINE_TICKER.match(req.symbol) else []
+            result = await run_in_threadpool(chartdata.build, data(c), c.scan, c.schedule.tz, req, datetime.now(c.schedule.tz), lines)
+        except ValueError as e:
+            return error(str(e))
+        except Exception as e:  # the data source: keys, network, a ticker it doesn't have
+            return error(f"couldn't load the chart's data: {e}", 502)
+        if request.query_params.get("format") == "csv":
+            name = re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{req.symbol}_{result['tf']}_{result['type']}") + ".csv"
+            return Response(chartdata.csv_for(result, c.schedule.tz), media_type="text/csv",
+                            headers={"Content-Disposition": f'attachment; filename="{name}"'})
+        return JSONResponse(result)
+
+    def drawings(c: Config) -> Drawings:
+        return Drawings(c.log_dir / "drawings.json")
+
+    async def drawings_view(request: Request) -> Response:
+        """A symbol's drawn lines: GET ?symbol=SPY, or POST {symbol, drawings} to replace them."""
+        c = cfg()
+        if request.method == "POST":
+            d = await body(request)
+            try:
+                saved = drawings(c).save(str(d.get("symbol") or ""), d.get("drawings"), c.schedule.tz)
+            except ValueError as e:
+                return error(str(e))
+            return JSONResponse({"symbol": str(d.get("symbol")).upper(), "drawings": saved})
+        sym = (request.query_params.get("symbol") or "").upper()
+        return JSONResponse({"symbol": sym, "drawings": drawings(c).get(sym) if sym else []})
+
+    async def guard_view(request: Request) -> Response:
+        """The position guard: each position's line under it and ahead of it, and what broke (paperbot/guard.py)."""
+        g = Guard(cfg().log_dir).load()
+        g.pop("seen", None)
+        return JSONResponse(g)
+
+    async def studies_view(request: Request) -> Response:
+        return JSONResponse({"studies": study_catalog()})
+
+    async def watchlists_view(request: Request) -> Response:
+        c = cfg()
+        w = watchlists(c)
+        if request.method == "POST":
+            try:
+                return JSONResponse(w.save(await body(request)))
+            except ValueError as e:
+                return error(str(e))
+        return JSONResponse(w.load())
+
+    async def quotes(request: Request) -> Response:
+        c = cfg()
+        syms = [str(s).strip().upper() for s in ((await body(request)).get("symbols") or [])][:100]
+
+        def look() -> list[dict]:
+            out = []
+            for s in syms:
+                try:
+                    last, prev = data(c).last_price(s)
+                except Exception:
+                    last, prev = None, None
+                out.append({"symbol": s, "last": last, "prev": prev,
+                            "change": None if last is None or not prev else last - prev,
+                            "pct": None if last is None or not prev else (last / prev - 1) * 100})
+            return out
+
+        return JSONResponse({"quotes": await run_in_threadpool(look)})
+
+    def alert_store(c: Config) -> alerting.AlertStore:
+        return alerting.AlertStore(c.log_dir)
+
+    def alert_rows(c: Config) -> list[dict]:
+        rows = []
+        for a in alert_store(c).load():
+            try:
+                rows.append(a | {"description": alerting.describe(a)})
+            except (KeyError, TypeError, ValueError):
+                rows.append(a | {"description": "this alert can't be read"})
+        return rows
+
+    async def alerts_view(request: Request) -> Response:
+        c = cfg()
+        store = alert_store(c)
+        if request.method == "POST":
+            try:
+                a = alerting.validate(await body(request), watchlists(c).by_name())
+                store.add(a, datetime.now(c.schedule.tz))
+            except ValueError as e:
+                return error(str(e))
+        since = request.query_params.get("since") or ""
+        events = [e for e in store.events() if not since or e["at"] > since]
+        night = any(a.get("session") == "24h" and a.get("status") == "active" for a in store.load())
+        return JSONResponse({"alerts": alert_rows(c), "events": events, "ops": alerting.OPS, "triggers": alerting.TRIGGERS,
+                             "checking": alerting.checking_hours(datetime.now(c.schedule.tz), night), "overnight": night})
+
+    async def alert_change(request: Request) -> Response:
+        c = cfg()
+        store = alert_store(c)
+        aid, d = request.path_params["id"], await body(request)
+        try:
+            if d.get("action") == "delete":
+                store.remove(aid)
+            elif d.get("action") == "edit":
+                store.update(aid, {"alert": alerting.validate(d.get("alert") or {}, watchlists(c).by_name()), "status": "active"},
+                             datetime.now(c.schedule.tz))
+            elif d.get("action") in ("pause", "resume"):
+                store.update(aid, {"status": "paused" if d["action"] == "pause" else "active"}, datetime.now(c.schedule.tz))
+            else:
+                return error("action must be delete, edit, pause or resume")
+        except KeyError:
+            return error("there's no such alert", 404)
+        except ValueError as e:
+            return error(str(e))
+        return JSONResponse({"alerts": alert_rows(c)})
+
     routes = [
         Route("/", index),
         Route("/api/token", token_view),
@@ -467,6 +617,14 @@ def create_app(config_path: Path, token: str | None = None, timeout: float = 300
         Route("/api/journal", journal_view),
         Route("/api/commands", commands),
         Route("/api/commands/{name}", run, methods=["POST"]),
+        Route("/api/chart-data", chart_data, methods=["POST"]),
+        Route("/api/studies", studies_view),
+        Route("/api/guard", guard_view),
+        Route("/api/drawings", drawings_view, methods=["GET", "POST"]),
+        Route("/api/watchlists", watchlists_view, methods=["GET", "POST"]),
+        Route("/api/quotes", quotes, methods=["POST"]),
+        Route("/api/alerts", alerts_view, methods=["GET", "POST"]),
+        Route("/api/alerts/{id}", alert_change, methods=["POST"]),
         Mount("/static", VersionedStaticFiles(directory=STATIC), name="static"),
     ]
     app = Starlette(routes=routes, middleware=[
@@ -516,6 +674,69 @@ def morning_reports(config_path: Path, run=subprocess.run, sleep=time.sleep, now
         sleep(30)
 
 
+def today_close(now: datetime, held: dict = {}) -> datetime | None:  # noqa: B006 - one lookup per day per process
+    """Today's close from Alpaca's exchange calendar (13:00 on half days), looked up once a day; None if the market is
+    closed today or the calendar can't be reached (tried again after 5 minutes)."""
+    if held.get("day") == now.date():
+        return held["close"]
+    if held.get("retry") and now < held["retry"]:
+        return None
+    try:
+        from ..broker import AlpacaPaperBroker
+
+        if "broker" not in held:  # paper only (it refuses live keys); used here for the calendar alone
+            held["broker"] = AlpacaPaperBroker(os.environ.get("ALPACA_API_KEY", ""), os.environ.get("ALPACA_SECRET_KEY", ""))
+        t = held["broker"].session_close(now.date())
+    except Exception as e:
+        print(f"exchange calendar failed: {e!r}", flush=True)
+        held["retry"] = now + timedelta(minutes=5)
+        return None
+    held.update(day=now.date(), close=datetime.combine(now.date(), t, tzinfo=now.tzinfo) if t else None, retry=None)
+    return held["close"]
+
+
+def alert_checks(config_path: Path, sleep=time.sleep) -> None:
+    """Check the page's alerts every 15 seconds while there's trading (4:00 to 20:00 on weekdays)."""
+    from ..journal import Journal
+    from ..notify import Alerts, build_channel
+
+    phone = None
+    while True:
+        try:
+            c = Config.load(config_path)
+            now = datetime.now(c.schedule.tz)
+            store = alerting.AlertStore(c.log_dir)
+            active = [a for a in store.load() if a.get("status") == "active"]
+            if phone is None:
+                journal = Journal(c.log_dir, lambda: datetime.now(c.schedule.tz))
+                phone = Alerts(build_channel(c.alerts, c.log_dir), c.alerts, journal, lambda: datetime.now(c.schedule.tz))
+            # the position guard: your positions (from the scanner) against the lines on their symbols, around the clock
+            try:
+                state = json.loads((c.log_dir / "scan_state.json").read_text())
+            except (OSError, ValueError):
+                state = {}
+            if (state.get("holdings") or state.get("options")) and alerting.checking_hours(now, True):
+                m, lines_store = market_for(c), Drawings(c.log_dir / "drawings.json")
+
+                def candles(sym: str):
+                    if m.night_source is not None:
+                        return m.night(sym, 1, 1)
+                    return m.minutes(sym, 1)[0]
+
+                for e in Guard(c.log_dir).run(state, candles, lines_store.get, c.schedule.tz, now,
+                                              lambda title, msg, pri: phone.send(title, msg, pri), today_close(now)):
+                    print(f"{now:%H:%M:%S} guard: {e['text']}", flush=True)
+            if active and alerting.checking_hours(now, any(a.get("session") == "24h" for a in active)):
+                lists = Watchlists(c.log_dir / "watchlists.json", []).by_name()
+                lines = Drawings(c.log_dir / "drawings.json")
+                for e in alerting.evaluate(store, market_for(c), lists, now, lambda title, msg: phone.send(title, msg, "high"),
+                                           lines.find):
+                    print(f"{now:%H:%M:%S} alert: {e['message']}", flush=True)
+        except Exception as e:  # nothing here may stop the page
+            print(f"alert check failed: {e!r}", flush=True)
+        sleep(15)
+
+
 def serve(config_path: Path, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False) -> None:
     import uvicorn
 
@@ -523,6 +744,7 @@ def serve(config_path: Path, host: str = "127.0.0.1", port: int = 8765, open_bro
         raise ValueError("the web page only listens on this computer (127.0.0.1)")
     app = create_app(config_path)
     threading.Thread(target=morning_reports, args=(Path(config_path).resolve(),), daemon=True).start()
+    threading.Thread(target=alert_checks, args=(Path(config_path).resolve(),), daemon=True).start()
     url = f"http://127.0.0.1:{port}/"
     print(f"paperbot web: {url}  (this computer only; Ctrl-C to stop)", flush=True)
     if open_browser:

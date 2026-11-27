@@ -175,6 +175,14 @@ scan:                             # `paperbot scan`: read-only chart signals on 
   fib_swing_atr: 3.0              # Fibonacci retracements of swings at least this big
   forming_near_atr: 0.5           # warn of a head and shoulders / double / triple top or bottom still forming
                                   # once price closes this close (in ATRs) to its neckline
+  # VWAP coil: a tight box around a flat VWAP on drying volume, then a close out of it (SPY 2026-11-25, 12:00)
+  coil_min_bars: 8                # the box lasts at least 8 candles (40 minutes)
+  coil_max_bars: 48               # and is looked for over at most 48
+  coil_max_height_atr: 2.5        # at most this many ATRs tall
+  coil_vwap_drift_atr: 0.75       # VWAP moves at most this much across it
+  coil_dryup_ratio: 0.75          # its volume is at most 0.75x the day's average before it
+  coil_breakout_volume: 1.2       # a break on less than 1.2x the box's volume is weak (logged, not alerted)
+  coil_swing_atr: 0.5             # swings this big give the shape into the box (descending triangle, falling wedge)
   qqe: true                       # QQE Long / QQE Short labels on the charts (shown only, never alerted)
   sr_breaks: true                 # support / resistance levels and their breaks (shown only)
   squeeze: true                   # squeeze releases (shown only)

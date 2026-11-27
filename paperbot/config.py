@@ -272,6 +272,16 @@ class ScanConfig(BaseModel):
     fib_swing_atr: float = Field(3.0, gt=0, description="Fibonacci retracements of swings at least this many ATRs")
     forming_near_atr: float = Field(0.5, gt=0, description=(
         "Warn of a top or bottom still forming once price closes within this many ATRs of its neckline"))
+    # VWAP coil (formations.coils): a tight box around a flat VWAP on drying volume, then a close out of it.
+    coil_min_bars: int = Field(8, ge=3, description="VWAP coil: the box lasts at least this many candles")
+    coil_max_bars: int = Field(48, ge=3, description="VWAP coil: the longest box looked at, in candles")
+    coil_max_height_atr: float = Field(2.5, gt=0, description="VWAP coil: the box is at most this many ATRs tall")
+    coil_vwap_drift_atr: float = Field(0.75, ge=0, description="VWAP coil: VWAP moves at most this many ATRs across the box")
+    coil_dryup_ratio: float = Field(0.75, gt=0, description=(
+        "VWAP coil: the box's volume is at most this share of the day's average before it"))
+    coil_breakout_volume: float = Field(1.2, gt=0, description=(
+        "VWAP coil: a break on less than this many times the box's volume is weak"))
+    coil_swing_atr: float = Field(0.5, gt=0, description="VWAP coil: swings of this many ATRs give the shape into the box")
     # The bigger picture (context.py): what the last few hours and a slower candle say, checked against
     # every signal from the faster candles. A signal that goes against it is flagged, or held back.
     context_mode: Literal["warn", "suppress", "off"] = Field("warn", description=(

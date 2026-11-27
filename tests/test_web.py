@@ -171,7 +171,10 @@ def test_every_chart_box_the_script_uses_is_on_the_page():
     parts = re.search(r"const showSmc = \{(.*?)\}", js).group(1)
     ids = [f"{k}-on" for k in re.findall(r"(\w+):", overlays)] + [f"smc-{k}-on" for k in re.findall(r"(\w+):", parts)]
     assert len(ids) >= 10
-    used = ids + re.findall(r'\$\("#([\w-]+)"\)', js)
-    made_by_script = set(re.findall(r'id="([\w-]+)"', js))  # e.g. the report's live box, built with the report
+    charts = (STATIC / "charts.js").read_text()  # the Charts and Alerts tabs, loaded after app.js
+    assert 'src="/static/charts.js' in html
+    used = ids + re.findall(r'\$\("#([\w-]+)"\)', js + charts)
+    made_by_script = set(re.findall(r'id="([\w-]+)"', js + charts))  # e.g. the report's live box, built with the report
     missing = sorted({i for i in used if f'id="{i}"' not in html and i not in made_by_script})
     assert missing == []
+    assert len(re.findall(r'\$\("#(ct-[\w-]+|al-[\w-]+)"\)', charts)) >= 40

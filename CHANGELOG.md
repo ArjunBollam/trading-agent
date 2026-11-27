@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-25 (10:05 PM CT): VWAP coil breakouts and breakdowns
+
+- New chart signal, in the classic group: `vwap_coil_breakout` and `vwap_coil_breakdown` (formations.coils).
+  A box of 8+ candles, at most `scan.coil_max_height_atr` (2.5) ATRs tall, with VWAP inside it and flat
+  (`coil_vwap_drift_atr`), on at most `coil_dryup_ratio` (0.75) of the day's volume before it; then a candle
+  closes `min_cross_atr` past the box and past VWAP. The alert gives the shape that led in (descending triangle,
+  falling wedge, or box; mirrored for breakdowns), the volume behind the break (weak under
+  `coil_breakout_volume`, 1.2x), a stop past the box and a measured target.
+- Built from SPY on 2026-11-25: flush to 695.45, lower highs 705.05 / 702.94 / 701.36 into a ~697.5 floor,
+  box 697.38-702.02 from 10:40 to 11:55 ET on 0.46x the morning's volume. It fires once, on the 12:00 candle
+  (703.81), target 711.62; SPY reached 718.43. Same day on AAPL, NVDA and SOXL it fires once or twice each.
+- claims.py checks it from scratch for the signal audit; explain.py has its tooltip; `paperbot patterns` lists
+  118 kinds. 7 new tests in tests/test_coil.py on the real SPY candles (tests/data/spy_2026-11-25_5m.csv).
+
 ## 2026-10-28 (11:30 AM): VWAP bounces and rejections need a real touch
 
 - A VWAP bounce or rejection now needs the candle's low or high within `scan.vwap_touch_atr` (0.1) ATRs of

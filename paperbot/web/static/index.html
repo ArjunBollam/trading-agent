@@ -7,15 +7,18 @@
   <link rel="stylesheet" href="/static/app.css?v={{V}}">
   <script>window.PAPERBOT_TOKEN = "{{TOKEN}}"; window.PAPERBOT_VERSION = "{{V}}";</script>
   <script src="/static/app.js?v={{V}}" defer></script>
+  <script src="/static/charts.js?v={{V}}" defer></script>
 </head>
 <body>
   <header class="top">
     <div class="brand">paper<span>bot</span></div>
     <nav id="nav">
       <button data-tab="dashboard" class="active">Dashboard</button>
+      <button data-tab="charts">Charts</button>
       <button data-tab="report">Report<span class="dot" id="report-dot" hidden></span></button>
       <button data-tab="signals">Signals</button>
       <button data-tab="audit">Audit</button>
+      <button data-tab="alerts">Alerts<span class="dot" id="alerts-dot" hidden></span></button>
       <button data-tab="patterns">Patterns</button>
       <button data-tab="settings">Settings</button>
       <button data-tab="bot">Paper bot</button>
@@ -36,6 +39,186 @@
   </div>
 
   <main>
+    <!-- Charts: any symbol, interval, chart type and indicator, up to 16 at once -->
+    <section id="tab-charts" class="tab">
+      <div class="ct-bar">
+        <form id="ct-symbol-form" class="inline" title="A ticker, or a formula of tickers such as SPY/QQQ or (AAPL+MSFT)/2">
+          <input id="ct-symbol" list="ct-symbol-list" autocomplete="off" spellcheck="false" placeholder="Symbol or formula" size="12">
+          <datalist id="ct-symbol-list"></datalist>
+        </form>
+        <select id="ct-tf" title="Interval">
+          <optgroup label="Seconds (IEX trades)"><option>1s</option><option>5s</option><option>10s</option><option>15s</option><option>30s</option></optgroup>
+          <optgroup label="Minutes"><option>1m</option><option>2m</option><option>3m</option><option>5m</option><option>10m</option><option>15m</option><option>30m</option><option>45m</option></optgroup>
+          <optgroup label="Hours"><option>1h</option><option>2h</option><option>3h</option><option>4h</option></optgroup>
+          <optgroup label="Days"><option>1D</option><option>1W</option><option>1M</option></optgroup>
+          <optgroup label="Ticks (IEX trades)"><option>10T</option><option>100T</option><option>1000T</option></optgroup>
+          <optgroup label="Ranges (IEX trades)"><option>R0.1</option><option>R0.25</option><option>R0.5</option><option>R1</option></optgroup>
+          <option value="custom">Custom…</option>
+        </select>
+        <input id="ct-tf-custom" placeholder="7m, 90s, 250T, R0.2" size="9" hidden title="Any interval: s seconds, m minutes, h hours, D days, W weeks, M months, T trades, R range">
+        <select id="ct-type" title="Chart type">
+          <option value="candles">Candles</option><option value="hollow">Hollow candles</option><option value="bars">Bars</option>
+          <option value="line">Line</option><option value="area">Area</option><option value="baseline">Baseline</option>
+          <option value="volume_candles">Volume candles</option><option value="heikin">Heikin Ashi</option>
+          <option value="renko">Renko</option><option value="linebreak">Line break</option><option value="kagi">Kagi</option>
+          <option value="pnf">Point &amp; figure</option>
+        </select>
+        <span id="ct-type-opts" class="ct-opts"></span>
+        <select id="ct-session" title="Which hours the chart shows">
+          <option value="rth">Regular hours</option>
+          <option value="ext" selected>Extended 4:00–20:00</option>
+          <option value="24h">24 hours (overnight too)</option>
+        </select>
+        <button type="button" id="ct-studies-open" title="Add, change or remove indicators">Indicators <span class="count" id="ct-study-count">0</span></button>
+        <span class="seg ct-tools" id="ct-tools" role="group" aria-label="Drawing tools">
+          <button type="button" data-tool="cursor" class="on" title="Select, move or delete lines">Select</button>
+          <button type="button" data-tool="trend" title="Trend line: click its two points (it carries on to the right)">Trend line</button>
+          <button type="button" data-tool="hline" title="Horizontal line: click once">H-line</button>
+          <button type="button" data-tool="hray" title="Horizontal ray: from where you click, to the right">H-ray</button>
+        </span>
+        <label class="overlay-toggle" title="Snap each point to the nearest open, high, low or close of the candle"><input type="checkbox" id="ct-magnet" checked> Magnet</label>
+        <input type="color" id="ct-draw-color" value="#2962ff" title="The selected line's colour (and the next one's)">
+        <button type="button" id="ct-draw-delete" title="Delete the selected line (or press Delete)" disabled>Delete line</button>
+        <button type="button" id="ct-line-alert" title="An alert when price crosses the selected line, or breaks and retests it" disabled>Line alert</button>
+        <button type="button" id="ct-all-alerts" title="A phone alert when price crosses any line on this symbol (1-minute candles, checked every 15 seconds)">Alert all lines</button>
+        <button type="button" id="ct-risk-open" title="How many shares or contracts for your account, risk and stop">Risk</button>
+        <details id="ct-draw" class="ct-menu">
+          <summary>Overlays ▾</summary>
+          <div class="overlay-menu">
+            <label><input type="checkbox" data-ov="qqe"> QQE signals</label>
+            <label><input type="checkbox" data-ov="sr"> S/R Breaks</label>
+            <label><input type="checkbox" data-ov="sqz"> Squeeze</label>
+            <label><input type="checkbox" data-ov="smc"> Smart Money</label>
+            <hr>
+            <label title="Each session's volume at each price, from 1-minute candles"><input type="checkbox" data-ov="profile"> Session volume profile</label>
+            <label title="Volume at each price for the candles on screen"><input type="checkbox" data-ov="vpvr"> Visible range profile</label>
+            <label title="Market profile: a letter for each half hour at every price it traded (regular hours)"><input type="checkbox" data-ov="tpo"> TPO</label>
+            <label title="Volume sold at the bid and bought at the offer at each price, from IEX trades (zoom in to read it)"><input type="checkbox" data-ov="footprint"> Volume footprint</label>
+            <hr>
+            <label title="Lines through 3 or more swing highs or lows that no candle's wick goes through"><input type="checkbox" data-ov="auto"> Auto trend lines</label>
+            <label title="Each drawn line's break, retest and outcome, on closed candles"><input type="checkbox" data-ov="stages"> Break and retest marks</label>
+            <label title="Your Robinhood positions in this symbol (from the scanner): average cost, or the option's strike"><input type="checkbox" data-ov="positions"> Positions</label>
+          </div>
+        </details>
+        <select id="ct-layout" title="Charts on the page">
+          <option value="1">1 chart</option><option value="2">2 charts</option><option value="3">3 charts</option><option value="4">4 charts</option>
+          <option value="6">6 charts</option><option value="8">8 charts</option><option value="9">9 charts</option><option value="12">12 charts</option>
+          <option value="16">16 charts</option>
+        </select>
+        <span class="spacer"></span>
+        <button type="button" id="ct-replay-open" title="Bar replay: go back to a candle and play the chart forward from there">Replay</button>
+        <button type="button" id="ct-more" title="Load twice as much history">More history</button>
+        <button type="button" id="ct-export" title="Download the chart's candles and indicators as CSV">Export</button>
+        <button type="button" id="ct-alert" title="Set an alert on this chart's symbol">Alert</button>
+        <button type="button" id="ct-watch-toggle" title="Show or hide the watchlist">Watchlist</button>
+      </div>
+      <div id="ct-replay" class="ct-replay" hidden>
+        <b>Bar replay</b>
+        <span id="ct-replay-at" class="muted">Click a candle to start from it</span>
+        <button type="button" id="ct-replay-back" title="One candle back">⏮</button>
+        <button type="button" id="ct-replay-play" title="Play or pause">▶</button>
+        <button type="button" id="ct-replay-step" title="One candle forward">⏭</button>
+        <select id="ct-replay-speed" title="Candles a second"><option value="0.5">0.5/s</option><option value="1" selected>1/s</option><option value="2">2/s</option><option value="5">5/s</option></select>
+        <button type="button" id="ct-replay-pick">Pick a new start</button>
+        <button type="button" id="ct-replay-exit" class="ghost">Back to live</button>
+      </div>
+      <div class="ct-body">
+        <div id="ct-grid" class="ct-grid"></div>
+        <aside id="ct-watch" class="ct-watch">
+          <div class="ct-watch-head">
+            <select id="ct-wl" title="Watchlist"></select>
+            <button type="button" id="ct-wl-new" class="ghost" title="New watchlist">＋</button>
+            <button type="button" id="ct-wl-rename" class="ghost" title="Rename this watchlist">✎</button>
+            <button type="button" id="ct-wl-delete" class="ghost" title="Delete this watchlist">🗑</button>
+          </div>
+          <form id="ct-wl-add" class="inline"><input id="ct-wl-input" placeholder="Add symbols: NVDA, TSLA" autocomplete="off" spellcheck="false"></form>
+          <table id="ct-wl-table" class="grid ct-wl-table"></table>
+          <div id="ct-guard-card" class="ct-guard-card" hidden></div>
+          <div class="ct-watch-foot">
+            <button type="button" id="ct-wl-scan" title="Make this list the live scanner's symbols">Scan these</button>
+            <button type="button" id="ct-wl-alert" title="An alert on every symbol of this list">Alert on list</button>
+          </div>
+        </aside>
+      </div>
+      <dialog id="ct-risk" class="ct-dialog ct-small">
+        <div class="ct-dialog-head"><b>Position size</b><span class="muted small">information only: paperbot never places orders on Robinhood</span>
+          <span class="spacer"></span><button type="button" id="ct-risk-close" class="ghost">✕</button></div>
+        <form id="ct-risk-form" class="ct-risk">
+          <label>Side <select id="rk-side"><option value="buy">Buy (after a down line breaks)</option><option value="sell">Sell (after an up line breaks)</option></select></label>
+          <label>Account size $ <input type="number" id="rk-account" step="any" min="0" placeholder="25000"></label>
+          <label>Risk % <input type="number" id="rk-pct" step="any" min="0" max="100" value="1"></label>
+          <label>Entry <input type="number" id="rk-entry" step="any" min="0"></label>
+          <label>Stop <input type="number" id="rk-stop" step="any" min="0"></label>
+          <div class="muted small" id="rk-stop-why"></div>
+          <fieldset><legend>Options (optional)</legend>
+            <label>Premium at entry <input type="number" id="rk-prem" step="any" min="0" placeholder="2.40"></label>
+            <label>Premium at the stop <input type="number" id="rk-prem-stop" step="any" min="0" placeholder="1.60"></label>
+          </fieldset>
+          <div id="rk-out" class="rk-out"></div>
+        </form>
+      </dialog>
+      <dialog id="ct-studies" class="ct-dialog">
+        <div class="ct-dialog-head"><b>Indicators</b><span class="muted small" id="ct-studies-for"></span><span class="spacer"></span>
+          <button type="button" id="ct-studies-close" class="ghost">✕</button></div>
+        <div class="ct-dialog-body">
+          <div class="ct-catalog"><input id="ct-study-search" placeholder="Search 41 indicators" autocomplete="off"><div id="ct-catalog"></div></div>
+          <div class="ct-chosen"><div class="muted small">On this chart (up to 50). An indicator can use an earlier one's line as its source.</div><div id="ct-chosen"></div></div>
+        </div>
+      </dialog>
+    </section>
+
+    <!-- Alerts: on price, any indicator or several conditions, for a symbol or a watchlist -->
+    <section id="tab-alerts" class="tab">
+      <div class="al-layout">
+        <div class="panel al-form-panel">
+          <div class="panel-head"><h3 id="al-form-title">New alert</h3><span class="muted small" id="al-checking"></span></div>
+          <form id="al-form">
+            <div class="al-row">
+              <label><input type="radio" name="al-target" value="symbols" checked> Symbols</label>
+              <input id="al-symbols" placeholder="SPY, QQQ" autocomplete="off" spellcheck="false">
+              <label><input type="radio" name="al-target" value="watchlist"> Watchlist</label>
+              <select id="al-watchlist"></select>
+            </div>
+            <div class="al-row">
+              <span class="muted">On</span>
+              <select id="al-tf"><option>1m</option><option>2m</option><option>3m</option><option selected>5m</option><option>10m</option><option>15m</option>
+                <option>30m</option><option>45m</option><option>1h</option><option>2h</option><option>4h</option><option>1D</option></select>
+              <span class="muted">candles, when</span>
+              <select id="al-match"><option value="all">all</option><option value="any">any</option></select>
+              <span class="muted">of these hold:</span>
+            </div>
+            <div id="al-conds"></div>
+            <button type="button" id="al-add-cond" class="ghost">＋ Condition</button>
+            <div class="al-row">
+              <span class="muted">Fire</span>
+              <select id="al-trigger"><option value="once">Only once</option><option value="bar">Once per bar</option><option value="close">Once per bar close</option></select>
+              <span class="muted">until</span>
+              <input type="datetime-local" id="al-expires" title="Leave empty: the alert never expires">
+              <label><input type="checkbox" id="al-phone" checked> Phone</label>
+              <label title="Check it overnight too, on Robinhood's 24-hour market candles (5-minute and up)"><input type="checkbox" id="al-overnight"> Overnight too</label>
+            </div>
+            <div class="al-row">
+              <input id="al-name" placeholder="Name (optional)" maxlength="80">
+              <input id="al-note" placeholder="Message to include (optional)" maxlength="300" class="al-grow">
+            </div>
+            <div class="al-row">
+              <button type="submit" class="primary" id="al-save">Create alert</button>
+              <button type="button" id="al-cancel" class="ghost" hidden>Cancel edit</button>
+              <button type="button" id="al-desktop" class="ghost" hidden>Turn on desktop alerts</button>
+            </div>
+          </form>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>Alerts <span class="count" id="al-count">0</span></h3></div>
+          <div class="table-wrap"><table id="al-table" class="grid"></table></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>Fired</h3></div>
+          <div class="table-wrap"><table id="al-log" class="grid"></table></div>
+        </div>
+      </div>
+    </section>
+
     <!-- Dashboard -->
     <section id="tab-dashboard" class="tab active">
       <div class="toolbar">

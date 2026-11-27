@@ -178,7 +178,7 @@ GROUPS = {"classic": "chart_patterns", "candlestick": "candle_patterns", "fibona
 def catalog() -> list[tuple[str, str, str]]:
     """(group, kind, label) for every pattern, grouped like thinkorswim's pattern tabs."""
     def group(kind: str) -> str:
-        return "classic" if kind in CHART | FORMING else "candlestick" if kind in CANDLES else "fibonacci"
+        return "classic" if kind in CHART | FORMING | COIL else "candlestick" if kind in CANDLES else "fibonacci"
     order = list(GROUPS)
     return sorted(((group(k), k, v) for k, v in LABELS.items()), key=lambda r: (order.index(r[0]), r[2]))
 
@@ -309,7 +309,7 @@ def chart_patterns(bars: list[Bar], atr: float, cfg: ScanConfig) -> list[Hit]:
         detail = (f"closed {'above' if up else 'below'} its {what} {k.line:.2f} (swing points {swings} "
                   f"since {since})")
         out.append((k.kind, k.side, detail, False, None))
-    return out + forming_patterns(bars, atr, cfg)
+    return out + forming_patterns(bars, atr, cfg) + coil_patterns(bars, atr, cfg)
 
 
 _NECKLINE = {"double_top", "double_bottom", "triple_top", "triple_bottom", "head_and_shoulders",
@@ -836,3 +836,142 @@ def _harmonic(piv: list[Pivot]) -> tuple[str, list[Pivot], str] | None:
         if ab > 0 and bc > 0 and d.price < b.price and within(bc / ab, (0.382, 0.886)) and within(cd / ab, (0.9, 1.1)):
             return "abcd", piv[-4:], f"CD {cd / ab:.2f} of AB, C at {bc / ab:.3f} of AB"
     return None
+
+
+# --- VWAP coil ----------------------------------------------------------------------------------
+#
+# The setup SPY traded on 2026-11-25: a flush at the open (to 695.45), lower highs into a flat floor
+# near 697.5 (a descending triangle), then more than an hour boxed in 697.4-702.0 around a flat VWAP while
+# volume dried up to under half the morning's. The 12:00 candle closed above the box and VWAP on
+# heavier volume, and SPY ran to 718. The scan reports the break: the coil it came out of, its shape,
+# the volume behind it, a stop under the box and a measured target.
+
+COIL = {"vwap_coil_breakout", "vwap_coil_breakdown"}
+LABELS |= {"vwap_coil_breakout": "VWAP coil breakout", "vwap_coil_breakdown": "VWAP coil breakdown"}
+_SHAPE_MIRROR = {"descending triangle": "ascending triangle", "falling wedge": "rising wedge", "box": "box"}
+
+
+@dataclass(frozen=True)
+class Coil:
+    """A tight box around a flat VWAP on drying volume that the last bar closed out of."""
+    kind: str
+    side: str  # buy: closed above the box, sell: below it
+    start: int  # bar index of the box's first bar
+    end: int  # bar index of its last bar (the bar before the break)
+    top: float
+    bottom: float
+    vwap: float  # on the last bar
+    dryup: float  # the box's average volume / the day's average before it
+    volume: float  # the breaking bar's volume / the box's average
+    extreme: float  # the day's low (high for a breakdown) the structure starts from
+    swings: tuple[float, ...]  # the swing highs (lows for a breakdown) from there into the box, oldest first
+    shape: str  # descending triangle, falling wedge or box; ascending triangle or rising wedge for a breakdown
+    stop: float  # the far side of the box
+    target: float  # the break's edge plus the structure's height
+    weak: bool  # the break came on less than scan.coil_breakout_volume times the box's volume
+
+
+def _vwaps(bars: list[Bar], first: int) -> list[float | None]:
+    """VWAP after each bar from `first`, regular-session bars only (as patterns.session_vwaps)."""
+    from .features import regular
+    out, pv, vol = [], 0.0, 0.0
+    for b in bars[first:]:
+        if regular(b):
+            pv += (b.h + b.l + b.c) / 3 * b.v
+            vol += b.v
+        out.append(pv / vol if vol > 0 else None)
+    return out
+
+
+def coils(bars: list[Bar], atr: float, cfg: ScanConfig) -> list[Coil]:
+    """The coil the last completed bar broke out of, either way, or nothing. Regular session only: VWAP
+    restarts each morning."""
+    from .features import regular
+    if len(bars) < 3 or atr <= 0 or not regular(bars[-1]):
+        return []
+    day = bars[-1].t.date()
+    first = next(i for i, x in enumerate(bars) if x.t.date() == day and regular(x))
+    out = []
+    for flip in (False, True):
+        b = mirror(bars) if flip else bars
+        c = _coil(b, first, atr, cfg)
+        if c is None:
+            continue
+        if flip:
+            r = lambda v: -v  # noqa: E731
+            c = Coil("vwap_coil_breakdown", "sell", c.start, c.end, r(c.bottom), r(c.top), r(c.vwap), c.dryup, c.volume,
+                     r(c.extreme), tuple(r(p) for p in c.swings), _SHAPE_MIRROR[c.shape], r(c.stop), r(c.target), c.weak)
+        out.append(c)
+    return out
+
+
+def _coil(b: list[Bar], first: int, atr: float, cfg: ScanConfig) -> Coil | None:
+    """The bullish break, written once; the bearish one runs this on the mirrored chart."""
+    n, end = len(b), len(b) - 2
+    vw = _vwaps(b, first)
+    last, vw_now, vw_end = b[-1], vw[-1], vw[end - first] if end >= first else None
+    if vw_now is None or vw_end is None:
+        return None
+    # The longest run of bars ending on the bar before the last that fits in coil_max_height_atr ATRs
+    cap = cfg.coil_max_height_atr * atr
+    top = bottom = start = None
+    for s in range(end, max(first, end - cfg.coil_max_bars + 1) - 1, -1):
+        hi, lo = max(top or b[s].h, b[s].h), min(bottom or b[s].l, b[s].l)
+        if hi - lo > cap:
+            break
+        top, bottom, start = hi, lo, s
+    if start is None or end - start + 1 < cfg.coil_min_bars:
+        return None
+    if not bottom < vw_end < top:
+        return None  # VWAP must run through the box: the market agreeing on a fair price
+    if abs(vw_end - vw[start - first]) > cfg.coil_vwap_drift_atr * atr:
+        return None  # and stay flat while it does
+    before = [x.v for x in b[first:start]]
+    box_v = sum(x.v for x in b[start:end + 1]) / (end - start + 1)
+    if len(before) < 3 or not sum(before) or not box_v:
+        return None
+    dryup = box_v / (sum(before) / len(before))
+    if dryup > cfg.coil_dryup_ratio:
+        return None  # the coil is quieter than the day before it
+    buf = cfg.min_cross_atr * atr
+    if not (last.c > top + buf and last.c > vw_now + buf and b[-2].c <= top):
+        return None
+    # The structure: from the day's low into the box. Its swing highs give the shape, its height the target.
+    low_i = min(range(first, end + 1), key=lambda i: b[i].l)
+    seg = b[low_i:end + 1]
+    tol = cfg.pattern_tolerance_atr * atr
+    piv = zigzag(seg, cfg.coil_swing_atr * atr)
+    highs = [p.price for p in piv if p.high]
+    lows = [p.price for p in piv if not p.high and p.i + low_i >= start] + [bottom]
+    falling = (len(highs) >= 2 and highs[-1] < highs[0] - tol  # lower highs, give or take a wobble
+               and all(y < x + tol / 2 for x, y in zip(highs, highs[1:], strict=False)))
+    shape = "box"
+    if falling and max(lows) - min(lows) <= tol:
+        shape = "descending triangle"
+    elif falling and len(lows) >= 2 and lows[-1] < lows[0] - tol / 2:
+        shape = "falling wedge"
+    height = max(x.h for x in seg) - b[low_i].l
+    vol = last.v / box_v
+    return Coil("vwap_coil_breakout", "buy", start, end, top, bottom, vw_now, dryup, vol, b[low_i].l, tuple(highs),
+                shape, bottom - buf, top + height, vol < cfg.coil_breakout_volume)
+
+
+def coil_patterns(bars: list[Bar], atr: float, cfg: ScanConfig) -> list[Hit]:
+    out: list[Hit] = []
+    for c in coils(bars, atr, cfg):
+        up = c.side == "buy"
+        mins = (bars[c.end].t - bars[c.start].t).seconds // 60 + (bars[1].t - bars[0].t).seconds // 60
+        lead = ""
+        if c.swings:
+            what = ("lower highs" if up else "higher lows") if c.shape != "box" else "swing highs" if up else "swing lows"
+            lead = (f"from the day's {'low' if up else 'high'} {c.extreme:.2f}, {what} "
+                    f"{', '.join(f'{p:.2f}' for p in c.swings)} ({c.shape}); ")
+        risk, reward = abs(bars[-1].c - c.stop), abs(c.target - bars[-1].c)
+        detail = (f"{lead}coiled {c.bottom:.2f}-{c.top:.2f} around a flat VWAP {c.vwap:.2f} for {mins} min "
+                  f"({bars[c.start].t:%H:%M}-{bars[c.end].t:%H:%M}) on {c.dryup:.2f}x the volume before it; "
+                  f"closed {'above' if up else 'below'} the box and VWAP on {c.volume:.1f}x the coil's volume"
+                  f"{' (light, so less reliable)' if c.weak else ''}. "
+                  f"Stop {'under' if up else 'over'} {c.stop:.2f}, measured target {c.target:.2f}"
+                  + (f" (reward {reward / risk:.1f}x the risk)" if risk > 0 else ""))
+        out.append((c.kind, c.side, detail, c.weak, f"{bars[c.start].t:%m/%d %H:%M}"))
+    return out

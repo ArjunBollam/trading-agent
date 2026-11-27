@@ -42,12 +42,17 @@ the order-flow panel underneath: every candle's delta (bars) and the session's c
   it shows live whether the support held and which targets were reached.
 - **Every signal audited, live.** A separate checker works out each signal again from the candles, compares
   them with a second data source and flags anything wrong or missed within a minute.
+- **A TradingView-style charting workspace.** Seconds to months, ticks and ranges; Renko, Kagi, point & figure,
+  line break, Heikin Ashi and volume candles; 41 indicators that can run on each other; volume profiles, TPO and
+  a footprint; formula charts like SPY/QQQ; bar replay; up to 16 charts; watchlists; CSV export; trend-line drawing
+  with break-and-retest tracking; and alerts on price, any indicator, a drawn line or several conditions at once, for
+  a symbol or a whole watchlist.
 - **Context-aware phone alerts.** Each signal is checked against the slower trend and key price
   levels, then pushed to your phone, flagged when it goes against a position you hold.
 - **Any LLM, with automatic fallback.** Claude, Grok, Groq, Gemini or OpenRouter. When one model
   hits its rate limit or daily token budget, the next one answers.
 - **Built to be trusted.** Kill switches, a daily loss limit, runaway-order protection, a journal
-  of every decision, order and fill, and 385 tests that run against a fake broker and scripted AI
+  of every decision, order and fill, and 478 tests that run against a fake broker and scripted AI
   replies.
 
 **Tech:** Python 3.13 · LangGraph · Anthropic and OpenAI-compatible APIs · Alpaca API ·
@@ -420,9 +425,10 @@ The signals ([patterns.py](paperbot/patterns.py)), on completed 5-minute bars on
 | Daily | golden or death cross (50/200-day), new 52-week high or low |
 | Classic chart patterns | double top / bottom, triple top / bottom, head and shoulders and inverse (through the neckline); ascending, descending and symmetrical triangles, rising and falling wedges, channels up and down, rectangles (through either trendline); bull and bear flags and pennants (a 3-ATR pole, a pause, a break in the pole's direction). Drawn from swing highs and lows of 1 ATR or more over the last 120 bars; weak on light volume |
 | Candlestick patterns | every pattern on thinkorswim's Candlestick tab, bullish and bearish where both exist: abandoned baby, advance block, belt hold, breakaway, concealing baby swallow, dark cloud cover, deliberation, doji, downside / upside gap three methods, downside / upside tasuki gap, engulfing, evening / morning star and doji star, falling / rising three methods, hammer, hanging man, harami, harami cross, high / low price gapping play, homing pigeon, identical three crows, in neck, inverted hammer, kicker, ladder bottom, long-legged doji, marubozu, mat hold, matching low, meeting lines, on neck, piercing line, separating lines, shooting star, side-by-side white lines, stick sandwich, three black crows, three inside / outside up and down, three-line strike, three stars in the south, three white soldiers, thrusting, tri-star, two crows, unique three river bottom, upside gap two crows, Williams fractal, ZigZag step; plus dragonfly and gravestone doji, spinning top and tweezers. Reversals need a move into them (`candle_trend_atr`) |
+| VWAP coil | a tight box (at most 2.5 ATRs tall, 8 candles or more) with a flat VWAP running through it, on volume at most 0.75x the day's before it, then a close out of the box and past VWAP: a breakout up or a breakdown. The alert names the shape that led into it (lower highs into a flat floor is a descending triangle, falling lows too a falling wedge), the volume behind the break (under 1.2x the box's is weak), a stop past the box and a measured target (the height from the day's low, or high, added to the break). On SPY on 2026-11-25 it fires once, at the 12:00 candle (703.81): box 697.38-702.02 since 10:40, target 711.62, which SPY passed at 12:50 on its way to 718 |
 | Fibonacci | AB=CD, Gartley, Bat, Butterfly, Crab and Three Drives (bullish and bearish), when price turns at D; the first test that held at the 38.2 / 50 / 61.8 / 78.6% retracement of the latest swing of 3 ATRs or more |
 
-`paperbot patterns` lists all of them (110 kinds) with their group and what the scan does with each:
+`paperbot patterns` lists all of them (118 kinds) with their group and what the scan does with each:
 alert, log only or off. `scan.pattern_groups` turns a whole group (classic, candlestick, fibonacci) on or off,
 `scan.disabled_patterns` drops single patterns, and `scan.log_only_patterns` keeps them in the log without a
 phone alert; by default doji, long-legged doji, spinning tops and Williams fractals, which on 5-minute bars
@@ -508,6 +514,9 @@ A local page at http://127.0.0.1:8765/ for everything the command line does:
   price, RSI, trend and the scanner's bigger-picture reading; your positions with live P&L; today's signals as
   they come, filtered by symbol, side, against your position, and log-only. Add or remove live symbols at the
   top; the running scan follows within one check.
+- **Charts**: any symbol or formula, at any interval and in any chart type, with indicators, profiles, footprint,
+  bar replay and up to 16 charts at once, plus watchlists (below).
+- **Alerts**: price, indicator and multi-condition alerts on a symbol or a whole watchlist (below).
 - **Signals**: any day's signals from the journal, searchable, with counts per signal.
 - **Patterns**: every pattern by group (classic, candlestick, Fibonacci), each set to alert, log only or off.
 - **Settings**: every scanner setting with its description and its config.yaml value. Changes go to
@@ -553,6 +562,90 @@ and the log, and alerts only the latest.
 ```bash
 launchctl kickstart -k gui/$(id -u)/com.paperbot.audit
 ```
+
+**Charts tab.** The chart features of TradingView's top plan, on Alpaca market data (read-only), worked out in
+`charting.py`, `studies.py`, `formula.py` and `chartdata.py`:
+
+- **Intervals**: seconds (1s to 30s), minutes, hours, days, weeks and months, ticks (10T, 100T, 1000T), price ranges
+  (R0.25...), or any custom one (7m, 90s, 250T, R0.2). Intraday candles line up from each session's open (4:00, or 9:30
+  without extended hours).
+- **Sessions**: regular hours, extended (4:00-20:00), or 24 hours: Robinhood's overnight market too (Sunday 8 PM to Friday
+  8 PM ET), from its 5-minute candles through the scanner's sign-in, borrowed read-only. Alerts can run overnight as well.
+- **Chart types**: candles, hollow candles, bars, line, area, baseline, volume candles (width by volume), Heikin Ashi, Renko,
+  line break, Kagi and point & figure, each by its textbook rule. Box sizes default to ATR(14), rounded.
+- **Indicators**: 41 of TradingView's built-ins with the same defaults (moving averages, VWAP with bands, Bollinger,
+  Keltner and Donchian channels, Parabolic SAR, Supertrend, RSI, MACD, stochastics, CCI, MFI, ADX, OBV and more), up to
+  50 on a chart. Any indicator with a source can take an earlier one's line instead of price (an indicator on an
+  indicator, such as a 9-period average of RSI); oscillators get their own panes, scrolled together with the price.
+- **Overlays**: the dashboard's QQE, S/R breaks, squeeze and smart money labels (on minute charts up to 30m they are
+  worked out from regular-hours candles, as on the dashboard, so the same signals land on the same candles even when
+  the chart shows extended or overnight hours); each session's volume profile (from
+  1-minute candles); a visible-range profile; TPO (market profile letters by half hour, regular hours, with the point of
+  control, value area, initial balance and single prints); and a volume footprint (volume sold at the bid and bought at
+  the offer at each price, with delta and the busiest price, rows merged to stay readable as you zoom).
+- **Formula charts** such as `SPY/QQQ` or `(AAPL+MSFT)/2`, worked out on each candle's open, high, low and close.
+- **Bar replay**: click a candle and play the chart forward from it, a candle at a time or 0.5 to 5 a second. Each step is
+  worked out again as of that moment, so no candle, indicator value or label uses anything that came later.
+- **Up to 16 charts** (1, 2, 3, 4, 6, 8, 9, 12 or 16), each with its own symbol, interval, type and indicators; more
+  history on request (up to 60 sessions of minute candles, about 57,000 1-minute candles, and 20 years of daily ones);
+  CSV export of the candles and every indicator line.
+- **Watchlists**: as many as you like, with last price and change; click a symbol to chart it; "Scan these" makes a list
+  the live scanner's symbols.
+
+On the free data plan the whole market's candles and trades arrive 15 minutes late, so the newest 16 minutes of minute
+candles come from IEX (one exchange): their prices are live and right, their volume is IEX's share only (drawn fainter,
+and the chart says from when). Second, tick and range charts and the footprint are built from IEX trades for the same
+reason, and the footprint signs each trade buy or sell by the tick rule (regular hours). TradingView items that don't
+apply here: buying exchange data, priority support, publishing invite-only scripts, ads, separate desktop and phone apps,
+and limits on alerts or chart connections.
+
+**Alerts.** On the Alerts tab (or the Alert button on any chart): one to five conditions on price, volume, a number or any
+indicator line (crosses above, crosses below, crosses, is above, is below), all or any of them, on 1-minute to daily
+candles, for symbols or every symbol on a watchlist. Each fires only once, once per bar, or once per bar close, and never
+expires unless you give it an end date. The web page's process checks them every 15 seconds from 4:00 to 20:00 ET on
+weekdays; a match shows on the page (and as a desktop alert if you turn those on) and goes to your phone if the alert
+says so. Kept in `logs/alerts.json`, with each match in `logs/alerts_log.jsonl`.
+
+**Trend lines, break and retest** (`trendlines.py`). For trading trend-line breaks: draw lines through swing points on
+the higher timeframes first, wait for a candle to close through one, then for a later candle to pull back to it and close
+still holding; the stop goes just past the opposing line.
+
+- **Drawing tools** on the Charts tab: trend line (two clicks; it carries on to the right), horizontal line and horizontal
+  ray, with a magnet that snaps each point to the candle's open, high, low or close. Click a line to select it, drag it or
+  its ends, change its colour, or delete it (the button, or the Delete key). Lines are kept per symbol in
+  `logs/drawings.json` (`GET/POST /api/drawings`) and show on every time-based interval. A line moves at a steady rate per
+  hour of trading (nights, weekends and NYSE holidays don't count), so it's straight and at the same price on every
+  interval of its session. Lines drawn on the 24-hour session run on through the night.
+- **Break and retest marks** on each line, on the chart's closed candles: "Break" where a candle closes through it, then
+  "Retest held" where a later candle's wick comes back to the line (reaching it, or within a tenth of ATR) and closes on the
+  broken side, or "Retest failed" where it closes back through. Hover a mark for what that candle did, with the prices.
+  Bar replay shows them as they happened.
+- **Alerts on a line** (select it, then Line alert): price crossing it (up, down or either way), or the break and retest,
+  judged on closed candles, firing on the candle that confirms it with that candle's own description. An alert follows
+  the line if you move it later.
+- **Auto trend lines**: lines through 3 or more swing highs or lows (3 candles each side) that no candle's wick goes past,
+  within 0.15 ATR, labelled with their touches; resistance lines stop where a close broke them.
+- **Risk**: shares or option contracts from your account size, risk % (1% to start), entry and stop; the stop starts just
+  past the nearest line on the other side of price. Arithmetic only.
+- **Positions**: your Robinhood holdings (from the scanner) on that symbol's chart, at their average cost, and options at
+  their strike, with P&L.
+- **Position guard** (`guard.py`): every 15 seconds, each Robinhood position against the lines on its symbol, on
+  settled 1-minute closes. Calls and long shares look at the nearest horizontal or rising line under price (the floor);
+  puts and shorts at the nearest horizontal or falling line over it (the ceiling). The guard gives each position a verdict:
+  - **HOLD** while the last close is on the trade's side of that line.
+  - **EXIT** from the candle that closes through it, and it stays EXIT until a candle closes back over that line.
+  - **No floor** when no line is there.
+
+  Its events:
+  - **EXIT**, **Against you** and **Target** (the next level ahead) go to your phone straight away.
+  - **With you** goes to your phone when a candle breaks a line in the trade's favour (once per 5 minutes).
+  - A **HOLD** check-in goes out every quarter hour of regular hours. It gives the line, the distance to it, the next
+    level, the P&L, and, on an option's last day, the time to the close (13:00 on half days, from the exchange calendar)
+    and where price is against the strike.
+
+  Each event shows on the candle and in a banner over the chart that leads with the verdict.
+
+Nothing here places an order: paperbot only paper trades on Alpaca, and never trades on Robinhood.
 
 A launchd job (`~/Library/LaunchAgents/com.paperbot.web.plist`) keeps the page up: it starts at login and
 restarts if it stops, so http://127.0.0.1:8765/ is always there. Its log is

@@ -23,10 +23,8 @@ from .features import SESSIONS, Bar, atr, regular, session_of
 from .journal import Journal
 from .notify import Alerts
 from .orderflow import Check, check
-from .overlays import level_breaks, overnight_gap, pivot_levels, squeeze
+from .drawn import overlay_json
 from .patterns import ChartSignal, Level, Summary, analyze, levels, rsi_and_trend, session_vwaps
-from .qqe import qqe
-from .smc import smart_money
 from .robinhood import Holding, MarketSource, OptionHolding, mask
 
 MARKET_OPEN, MARKET_CLOSE = time(9, 30), time(16, 0)
@@ -520,51 +518,9 @@ class Scanner:
         """What the charts draw from `since` (or just `day`) to `day` besides the scanner's own signals: QQE, support and
         resistance breaks, squeeze releases and smart money concepts, each if it's on. From regular-hours candles only,
         like an RTH chart; the sessions before that warm them up."""
-        sc, out = self.cfg.scan, {}
         since = since or day
-        drawn = [i for i, b in enumerate(rth) if since <= b.t.date() <= day]
-
-        def t(i: int) -> int:
-            return int(rth[i].t.timestamp())
-
-        def on_day(i: int) -> bool:
-            return since <= rth[i].t.date() <= day
-
-        if sc.qqe:
-            out["qqe"] = [{"t": t(s.index), "side": s.side, "rsi": round(s.rsi, 1), "line": round(s.line, 1),
-                           "gap": overnight_gap(rth, s.index)}
-                          for s in qqe([b.c for b in rth], sc.qqe_rsi_period, sc.qqe_smoothing, sc.qqe_factor) if on_day(s.index)]
-        if sc.sr_breaks:
-            levels = pivot_levels(rth, sc.sr_pivot_bars, sc.sr_pivot_bars)
-            out["sr"] = {
-                "breaks": [{"t": t(x.index), "side": x.side, "kind": x.kind, "level": round(x.level, 4), "vol": round(x.volume),
-                            "gap": x.gap, "open": round(rth[x.index].o, 4)}
-                           for x in level_breaks(rth, sc.sr_pivot_bars, sc.sr_pivot_bars, sc.sr_volume, levels) if on_day(x.index)],
-                "levels": [[t(i), *levels[i]] for n, i in enumerate(drawn) if n == 0 or levels[i] != levels[i - 1]]}
-        if sc.squeeze:
-            found, lasting = squeeze(rth, sc.squeeze_length, sc.squeeze_bb_mult, sc.squeeze_kc_mult)
-            out["sqz"] = {"on": lasting if drawn and rth[-1].t.date() == day else 0,
-                          "signals": [{"t": t(x.index), "side": x.side, "mom": round(x.momentum, 3), "candles": x.candles, "gap": x.gap}
-                                      for x in found if on_day(x.index)]}
-        if sc.smc and rth:
-            m = smart_money(rth, sc.smc_swing)
-            inner = [x for x in m.blocks if x.internal][:sc.smc_blocks]
-            outer = [x for x in m.blocks if not x.internal][:sc.smc_swing_blocks]
-            out["smc"] = {
-                "swing": m.swing_bias, "internal": m.internal_bias,
-                "structure": [{"from": t(x.pivot), "t": t(x.index), "level": round(x.level, 4), "side": x.side, "kind": x.kind,
-                               "internal": x.internal, "gap": x.gap} for x in m.structures if on_day(x.index)],
-                "blocks": [{"from": t(x.index), "top": round(x.top, 4), "bottom": round(x.bottom, 4), "side": x.side,
-                            "internal": x.internal} for x in outer + inner],
-                "equal": [{"from": t(x.first), "t": t(x.second), "levels": [round(v, 4) for v in x.levels], "side": x.side,
-                           "known": t(x.known)} for x in m.equals if on_day(x.known)],
-                "fvg": [{"from": t(x.index), "top": round(x.top, 4), "bottom": round(x.bottom, 4), "side": x.side}
-                        for x in m.gaps if on_day(x.index)][:10],
-                "range": {"top": round(m.top, 4), "bottom": round(m.bottom, 4), "topFrom": t(m.top_index),
-                          "bottomFrom": t(m.bottom_index), "from": t(m.range_index),
-                          "zones": {k: [round(v, 4) for v in z] for k, z in m.zones().items()}}
-                if m.top is not None and m.bottom is not None else None}
-        return out
+        return overlay_json(rth, self.cfg.scan, lambda i: int(rth[i].t.timestamp()),
+                            lambda i: since <= rth[i].t.date() <= day, bool(rth) and rth[-1].t.date() == day)
 
     def _publish_minutes(self, now: datetime) -> None:
         """Write the 1-minute candles for the page's 1m charts."""

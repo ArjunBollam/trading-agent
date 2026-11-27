@@ -55,7 +55,7 @@ class NtfyChannel:
         self.http = http or httpx.Client(timeout=10)
 
     def send(self, title: str, message: str, priority: str, tags: list[str]) -> None:
-        headers = {**self.headers, "Title": title, "Priority": priority}
+        headers = {**self.headers, "Title": ascii_title(title), "Priority": priority}
         if tags:
             headers["Tags"] = ",".join(tags)
         self.http.post(f"{self.server}/{self.topic}", content=message.encode(), headers=headers).raise_for_status()
@@ -110,6 +110,13 @@ class TelegramChannel:
                 continue
             commands.append(str(msg.get("text", "")).strip().lower().lstrip("/"))
         return commands
+
+
+def ascii_title(title: str) -> str:
+    """ntfy takes the title as an HTTP header, which must be ASCII: "5× SPY" goes as "5x SPY", other symbols as "?"."""
+    for k, v in {"×": "x", "–": "-", "—": "-", "→": "->", "≥": ">=", "≤": "<=", "’": "'", "‘": "'", "“": '"', "”": '"', "…": "..."}.items():
+        title = title.replace(k, v)
+    return title.encode("ascii", "replace").decode()
 
 
 class ConsoleChannel:
